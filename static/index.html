@@ -759,7 +759,8 @@
   // ---- WebSocket ----
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    var url = proto + '://' + location.host + '/ws/match';
+    var basePath = location.pathname.replace(/\/[^/]*$/, '');
+    var url = proto + '://' + location.host + basePath + '/ws/match';
     ws = new WebSocket(url);
 
     ws.onopen = function() {

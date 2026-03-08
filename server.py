@@ -73,8 +73,8 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @app.get("/")
-def root_redirect():
-    return RedirectResponse(url="/static/index.html")
+def root_page():
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/viewer")
