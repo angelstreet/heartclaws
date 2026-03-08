@@ -72,7 +72,7 @@ open_world_save_path: str = "saves/openworld.json"
 # Connected WebSocket clients for live world updates
 world_ws_clients: set[WebSocket] = set()
 
-HEARTBEAT_INTERVAL_SECONDS = 300  # 5 minutes
+HEARTBEAT_INTERVAL_SECONDS = 10  # 10s for testing, 300 (5min) for production
 
 
 # ---------------------------------------------------------------------------
