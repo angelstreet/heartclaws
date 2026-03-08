@@ -357,8 +357,19 @@ def _validate_deactivate_subagent(state, action, player):
 
 def _validate_set_policy(state, action, player):
     aid = action.action_id
-    if "policy_name" not in action.payload or "value" not in action.payload:
-        return ValidationResult(accepted=False, action_id=aid, reason="Missing policy_name or value")
+    payload = action.payload
+    # Support both formats: {target_player_id, stance} and legacy {policy_name, value}
+    target = payload.get("target_player_id")
+    stance = payload.get("stance") or payload.get("value")
+    if not target and payload.get("policy_name"):
+        # Legacy: policy_name is ignored, but value is the stance
+        pass
+    if not target or not stance:
+        return ValidationResult(accepted=False, action_id=aid, reason="Missing target_player_id or stance")
+    if target not in state.players:
+        return ValidationResult(accepted=False, action_id=aid, reason="Target player not found")
+    if target == player.player_id:
+        return ValidationResult(accepted=False, action_id=aid, reason="Cannot set policy toward self")
     return ValidationResult(accepted=True, action_id=aid)
 
 
@@ -562,6 +573,15 @@ def _resolve_deactivate_subagent(state, action, player, cost):
 
 def _resolve_set_policy(state, action, player, cost):
     player.energy_spent_this_heartbeat += cost
+    payload = action.payload
+    target_pid = payload.get("target_player_id")
+    stance = payload.get("stance") or payload.get("value")
+    if target_pid and stance:
+        from .enums import DiplomaticStance
+        try:
+            player.diplomacy_stance[target_pid] = DiplomaticStance(stance)
+        except ValueError:
+            pass  # Invalid stance value, silently ignore
 
 
 def _resolve_transfer(state, action, player, cost):

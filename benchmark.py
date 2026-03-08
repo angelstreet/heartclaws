@@ -21,7 +21,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -170,27 +170,37 @@ MODELS: dict[str, ModelConfig] = {
 # LLM call abstraction
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a strategy game on a hex grid.
-You receive your game state as JSON and must respond with a JSON array of 1-3 actions.
+SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a hex-grid strategy game. Respond with a JSON array of 1-5 actions. No explanation, just JSON.
 
-Each action is: {"action_type": "...", "payload": {...}}
+Format: [{"action_type": "...", "payload": {...}}, ...]
 
-Available actions:
-- BUILD_STRUCTURE: {"sector_id": "H_x_y", "structure_type": "TOWER|EXTRACTOR|DATA_HARVESTER|BIO_CULTIVATOR|REACTOR|ATTACK_NODE|OUTPOST|SHIELD_GENERATOR|TRADE_HUB"}
-- ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"}
+ACTIONS & PAYLOADS:
+- BUILD_STRUCTURE: {"sector_id": "H_x_y", "structure_type": "TYPE"}
+  Types: TOWER (4E, expand territory), EXTRACTOR (4E, mine METAL — sector MUST have METAL resource node),
+  DATA_HARVESTER (4E, mine DATA — needs DATA node), BIO_CULTIVATOR (4E, mine BIOMASS — needs BIOMASS node),
+  REACTOR (8E, +energy income), ATTACK_NODE (6E, required to attack), OUTPOST (3E, cheap influence),
+  SHIELD_GENERATOR (6E, defense), TRADE_HUB (5E, trade bonus)
+- ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"} — need ATTACK_NODE in target/adjacent sector, cannot attack allies or spawn-protected players (first 10 heartbeats)
 - SET_POLICY: {"target_player_id": "pN", "stance": "ALLY|NEUTRAL|HOSTILE"}
 - TRANSFER_RESOURCE: {"target_player_id": "pN", "resource_type": "METAL|DATA|BIOMASS", "amount": N}
-- SCAN_SECTOR: {"sector_id": "H_x_y"}
-- REMOVE_STRUCTURE: {"structure_id": "st_xxx"}
+- SCAN_SECTOR: {"sector_id": "H_x_y"} — reveals sector info, must be controlled or adjacent to controlled
+- REMOVE_STRUCTURE: {"structure_id": "st_xxx"} — remove your own structure
 
-Strategy tips:
-- Build extractors on resource nodes first (check sector resource_nodes)
-- Expand with towers to adjacent uncontrolled sectors
-- Build reactors when you need more energy
-- Attack enemy extractors to cripple their economy
-- Ally with neighbors for shared influence
+BUILD RULES:
+- EXTRACTOR requires a METAL resource node in the sector (check resource_nodes array)
+- DATA_HARVESTER requires a DATA node, BIO_CULTIVATOR requires a BIOMASS node
+- You can only build in sectors you control OR uncontrolled sectors adjacent to one you control
+- Building a TOWER in an uncontrolled sector claims it for you
+- Each structure costs resources (metal/data/biomass) — check you have enough
 
-Respond ONLY with a JSON array of actions. No explanation."""
+STRATEGY:
+- Turn 1: SCAN adjacent sectors to find resource nodes, then BUILD extractors on matching resources
+- Expand with TOWERs to adjacent uncontrolled sectors
+- Build REACTOR when energy is low
+- Build ATTACK_NODE before attacking anyone
+- Ally with neighbors early (SET_POLICY stance=ALLY)
+
+Respond ONLY with a valid JSON array."""
 
 
 async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: str) -> list[dict]:
@@ -393,6 +403,7 @@ class BenchmarkAgent:
     actions_submitted: int = 0
     actions_failed: int = 0
     errors: int = 0
+    last_rejections: list[str] = field(default_factory=list)
 
 
 async def join_agent(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: str) -> bool:
@@ -436,6 +447,13 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     }
     state_json = json.dumps(compact_state, default=str)
 
+    # Include rejection feedback from last turn so the model can learn
+    if agent.last_rejections:
+        state_json += "\n\nLAST TURN REJECTED ACTIONS (avoid repeating these mistakes):\n"
+        for r in agent.last_rejections:
+            state_json += f"- {r}\n"
+    agent.last_rejections = []
+
     # Ask LLM for actions
     actions = await call_llm(client, agent.model, state_json)
 
@@ -461,6 +479,7 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
             agent.actions_failed += 1
             reason = result.get("reason", "?") if result else "no response"
             rejected.append(f"{action_type}({reason})")
+            agent.last_rejections.append(f"{action_type}: {reason}")
 
     summary = ", ".join(accepted) if accepted else "none"
     if rejected:
