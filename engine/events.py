@@ -70,6 +70,8 @@ def emit_action_failed(state: GameState, action) -> Event:
             "action_id": action.action_id,
             "action_type": action.action_type.value if hasattr(action.action_type, "value") else str(action.action_type),
             "failure_reason": action.failure_reason,
+            "energy_cost": action.energy_cost,
+            "payload": action.payload,
         },
     )
 
@@ -83,6 +85,8 @@ def emit_action_resolved(state: GameState, action) -> Event:
         details={
             "action_id": action.action_id,
             "action_type": action.action_type.value if hasattr(action.action_type, "value") else str(action.action_type),
+            "energy_cost": action.energy_cost,
+            "payload": action.payload,
         },
     )
 

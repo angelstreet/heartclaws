@@ -991,7 +991,9 @@ def world_messages(player_id: str) -> list:
 def world_stats() -> dict:
     """World KPIs: active/total players, structures, actions, economy."""
     state = _get_world()
-    return compute_world_kpis(state)
+    kpis = compute_world_kpis(state)
+    kpis["heartbeat_interval_seconds"] = HEARTBEAT_INTERVAL_SECONDS
+    return kpis
 
 
 @app.get("/world/history")

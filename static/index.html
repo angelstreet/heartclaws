@@ -347,6 +347,19 @@ body {
   color: var(--magenta);
   margin-right: 4px;
 }
+.event-row .ev-cost {
+  color: var(--yellow);
+  font-weight: 600;
+  font-size: 10px;
+}
+.event-row .ev-fail {
+  color: var(--red);
+  font-weight: 600;
+}
+.event-row b {
+  color: var(--cyan);
+  font-weight: 600;
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
@@ -697,12 +710,17 @@ function renderWorldStats() {
     return;
   }
   var html = '<div class="card"><h3 class="green">World Stats</h3><div class="stats-grid">';
+  var hbInterval = stats.heartbeat_interval_seconds || '--';
+  var hbLabel = hbInterval !== '--' ? (hbInterval >= 60 ? (hbInterval / 60) + 'min' : hbInterval + 's') : '--';
+  var totalPlayers = (stats.active_players || 0) + (stats.inactive_players || 0);
   var items = [
-    ['Total Players', stats.total_players || 0],
-    ['Active Players', stats.active_players || 0],
+    ['Heartbeat Interval', hbLabel],
+    ['Total Players', totalPlayers + ' (' + (stats.active_players || 0) + ' active, ' + (stats.inactive_players || 0) + ' inactive)'],
+    ['All-Time Players', stats.total_players_alltime || 0],
     ['Total Structures', stats.total_structures || 0],
-    ['Controlled Sectors', stats.controlled_sectors || 0],
-    ['Total Actions', stats.total_actions || 0],
+    ['Controlled Sectors', (stats.controlled_sectors || 0) + ' / ' + (stats.total_sectors || 64)],
+    ['Total Actions', (stats.actions_resolved || 0) + ' resolved, ' + (stats.actions_failed || 0) + ' failed'],
+    ['Season', stats.season || 1],
     ['Heartbeat', worldState ? worldState.heartbeat : '--'],
   ];
   items.forEach(function(it) {
@@ -748,16 +766,33 @@ function formatEvent(ev) {
   var type = ev.event_type || '';
   var actor = ev.actor_player_id || '';
   var actorName = worldState && worldState.players[actor] ? worldState.players[actor].name : actor;
-  if (type === 'STRUCTURE_BUILT') return esc(actorName) + ' built ' + (d.structure_type || '?') + ' in ' + (d.sector_id || '?');
-  if (type === 'STRUCTURE_DESTROYED') return (ev.target_id || '?') + ' destroyed in ' + (d.sector_id || '?');
+  var costTag = d.energy_cost != null ? ' <span class="ev-cost">[' + d.energy_cost + 'E]</span>' : '';
+  var payload = d.payload || {};
+
+  if (type === 'STRUCTURE_BUILT') return esc(actorName) + ' built <b>' + (d.structure_type || '?') + '</b> in ' + (d.sector_id || '?') + costTag;
+  if (type === 'STRUCTURE_DESTROYED') return '<b>' + (ev.target_id || '?') + '</b> destroyed in ' + (d.sector_id || '?');
   if (type === 'SECTOR_CONTROL_CHANGED') {
     var oldN = d.old_controller && worldState.players[d.old_controller] ? worldState.players[d.old_controller].name : (d.old_controller || 'none');
     var newN = d.new_controller && worldState.players[d.new_controller] ? worldState.players[d.new_controller].name : (d.new_controller || 'none');
-    return (ev.target_id || '?') + ': ' + esc(oldN) + ' -> ' + esc(newN);
+    return (ev.target_id || '?') + ': ' + esc(oldN) + ' &rarr; ' + esc(newN);
   }
-  if (type === 'ACTION_RESOLVED') return esc(actorName) + ' resolved ' + (d.action_type || '?');
-  if (type === 'ACTION_FAILED') return esc(actorName) + ' ' + (d.action_type || '?') + ' failed: ' + (d.failure_reason || d.reason || '?');
-  if (type === 'STRUCTURE_ATTACKED') return esc(actorName) + ' attacked ' + (ev.target_id || '?') + ' (' + (d.damage || '?') + ' dmg)';
+  if (type === 'ACTION_RESOLVED') {
+    var detail = '';
+    if (d.action_type === 'BUILD_STRUCTURE') detail = ' <b>' + (payload.structure_type || '?') + '</b> in ' + (payload.sector_id || '?');
+    else if (d.action_type === 'ATTACK_STRUCTURE') detail = ' target ' + (payload.target_structure_id || '?');
+    else if (d.action_type === 'SCAN_SECTOR') detail = ' ' + (payload.sector_id || '?');
+    else if (d.action_type === 'SET_POLICY') detail = ' ' + (payload.stance || '?') + ' toward ' + (payload.target_player_id || '?');
+    else if (d.action_type === 'TRANSFER_RESOURCE') detail = ' ' + (payload.amount || '?') + ' ' + (payload.resource_type || '?') + ' to ' + (payload.target_player_id || '?');
+    else if (d.action_type === 'REMOVE_STRUCTURE') detail = ' ' + (payload.structure_id || '?');
+    return esc(actorName) + ' ' + (d.action_type || '?') + detail + costTag;
+  }
+  if (type === 'ACTION_FAILED') {
+    return '<span class="ev-fail">' + esc(actorName) + ' ' + (d.action_type || '?') + ' FAILED</span>: ' + (d.failure_reason || d.reason || '?') + costTag;
+  }
+  if (type === 'STRUCTURE_ATTACKED') return esc(actorName) + ' attacked <b>' + (ev.target_id || '?') + '</b> (' + (d.damage || '?') + ' dmg, ' + (d.remaining_hp || '?') + ' HP left)' + costTag;
+  if (type === 'ENERGY_COMPUTED') return esc(actorName) + ' energy: income ' + (d.income || 0) + ', upkeep ' + (d.upkeep || 0) + ', available ' + (d.available || 0);
+  if (type === 'HEARTBEAT_STARTED') return 'Heartbeat ' + (d.heartbeat || '?') + ' started';
+  if (type === 'HEARTBEAT_COMPLETED') return 'Heartbeat completed';
   return type;
 }
 
