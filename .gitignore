@@ -6,3 +6,5 @@ saves/
 !package.json
 !_meta.json
 .venv/
+.env
+.env.*

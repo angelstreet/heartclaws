@@ -347,6 +347,11 @@ def match_page():
     return FileResponse(STATIC_DIR / "match.html")
 
 
+@app.get("/favicon.ico")
+def favicon():
+    return FileResponse(STATIC_DIR / "favicon.ico")
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ---------------------------------------------------------------------------

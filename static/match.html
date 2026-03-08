@@ -41,11 +41,14 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .header-title {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--green);
+  display: flex;
+  align-items: center;
 }
-.header-title span { color: var(--red); }
+.header-title img {
+  height: 36px;
+  width: auto;
+  filter: drop-shadow(0 0 8px rgba(255, 0, 0, 0.3));
+}
 .header-sub {
   font-size: 13px;
   color: var(--magenta);
@@ -241,7 +244,7 @@ body {
 <body>
 
 <div class="header">
-  <div class="header-title">Heart<span>Claws</span></div>
+  <div class="header-title"><img src="static/logo.png" alt="HeartClaws"></div>
   <div class="header-sub">Private Match</div>
   <a class="back-link" href="./">Back to World</a>
 </div>

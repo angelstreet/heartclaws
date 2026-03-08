@@ -92,9 +92,40 @@ MODELS: dict[str, ModelConfig] = {
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
+    "minimax-m25": ModelConfig(
+        name="MiniMax M2.5",
+        model_id="minimax/minimax-m2.5",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "minimax-01": ModelConfig(
+        name="MiniMax 01",
+        model_id="minimax/minimax-01",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    # --- Free OpenRouter models ---
+    "qwen3-coder": ModelConfig(
+        name="Qwen3 Coder 480B",
+        model_id="qwen/qwen3-coder-480b-a35b:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "deepseek-r1": ModelConfig(
+        name="DeepSeek R1",
+        model_id="deepseek/deepseek-r1:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "glm-4": ModelConfig(
+        name="GLM-4.5 Air",
+        model_id="thudm/glm-4.5-air:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
     # --- Direct APIs ---
     "minimax": ModelConfig(
-        name="MiniMax",
+        name="MiniMax M1",
         model_id="MiniMax-M1-80k",
         provider="minimax",
         api_key_env="MINIMAX_API_KEY",
@@ -385,7 +416,7 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
 # Main benchmark loop
 # ---------------------------------------------------------------------------
 
-async def run_benchmark(model_keys: list[str], turns: int) -> None:
+async def run_benchmark(model_keys: list[str], turns: int, session_name: str | None = None) -> None:
     """Run the benchmark in an isolated game instance. Never touches the persistent open world."""
     log.info("=" * 60)
     log.info("HeartClaws Benchmark — Battle Royale")
@@ -405,7 +436,8 @@ async def run_benchmark(model_keys: list[str], turns: int) -> None:
         import random
         seed = random.randint(1, 99999)
         run_id = f"benchmark-{int(time.time()) % 100000}"
-        session_name = f"Benchmark {run_id.split('-')[1]}"
+        if not session_name:
+            session_name = f"Benchmark {run_id.split('-')[1]}"
         result = await hc_post(
             client,
             f"/games/benchmark?seed={seed}&session_id={run_id}&session_name={session_name}",
@@ -516,17 +548,40 @@ async def run_benchmark(model_keys: list[str], turns: int) -> None:
             )
 
 
+def _resolve_model(key: str) -> tuple[str, ModelConfig]:
+    """Resolve a model key or OpenRouter model ID (e.g. 'meta-llama/llama-4-scout:free')."""
+    if key in MODELS:
+        return key, MODELS[key]
+    # Treat as an OpenRouter model ID (provider/model-name format)
+    if "/" in key:
+        name = key.split("/")[-1].split(":")[0].replace("-", " ").title()
+        model = ModelConfig(name=name, model_id=key, provider="openrouter", api_key_env="OPENROUTER_API_KEY")
+        return key, model
+    return key, None
+
+
 def main():
     parser = argparse.ArgumentParser(description="HeartClaws AI Benchmark")
     parser.add_argument("--turns", type=int, default=100, help="Number of heartbeats to play")
     parser.add_argument(
         "--models", type=str, default=",".join(MODELS.keys()),
-        help=f"Comma-separated model keys. Available: {','.join(MODELS.keys())}",
+        help=f"Comma-separated model keys or OpenRouter IDs (e.g. meta-llama/llama-4-scout:free). "
+             f"Presets: {','.join(MODELS.keys())}",
     )
+    parser.add_argument("--name", type=str, default=None, help="Session name shown in Ranking of Claws (e.g. 'Night Run 6 models')")
     args = parser.parse_args()
 
     model_keys = [m.strip() for m in args.models.split(",") if m.strip()]
-    asyncio.run(run_benchmark(model_keys, args.turns))
+    # Register any ad-hoc OpenRouter models
+    for key in model_keys:
+        if key not in MODELS:
+            resolved_key, model = _resolve_model(key)
+            if model:
+                MODELS[resolved_key] = model
+                log.info("Ad-hoc model registered: %s → %s", resolved_key, model.model_id)
+            else:
+                log.warning("Unknown model key: %s", key)
+    asyncio.run(run_benchmark(model_keys, args.turns, session_name=args.name))
 
 
 if __name__ == "__main__":

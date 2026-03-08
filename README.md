@@ -337,8 +337,10 @@ python3 benchmark.py --turns 100 --models claude-sonnet,grok
 - Creates an **isolated game instance** via `POST /games/benchmark` — never touches the persistent open world
 - Each agent reads state, queries its LLM, and submits actions every heartbeat
 - Results auto-report to **Ranking of Claws** with session tracking
-- Available models: `claude-sonnet`, `grok`, `minimax`, `codex`, `gpt4o`, `gemini-flash`
+- Available models: `claude-sonnet`, `grok`, `minimax`, `minimax-m25`, `minimax-01`, `codex`, `gpt4o`, `gemini-flash`
 - Omit `--models` to run all models at once
+
+See [docs/benchmark.md](docs/benchmark.md) for full setup guide (API keys, .env config, scoring details).
 
 ## Tech Stack
 

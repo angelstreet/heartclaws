@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HeartClaws — Open World</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico" />
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
 
@@ -45,12 +46,25 @@ body {
   flex-wrap: wrap;
 }
 .header-title {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--green);
-  letter-spacing: 1px;
+  display: flex;
+  align-items: center;
 }
-.header-title span { color: var(--red); }
+.header-title img {
+  height: 72px;
+  width: auto;
+  filter: none;
+}
+.header-logo-right {
+  height: 48px;
+  width: auto;
+  margin-left: 16px;
+}
+.header-logo-left {
+  height: 48px;
+  width: auto;
+  margin-right: 16px;
+  filter: none;
+}
 
 .player-dropdown-wrap {
   position: relative;
@@ -370,13 +384,14 @@ body {
 <body>
 
 <div class="header">
-  <div class="header-title">Heart<span>Claws</span></div>
+  <div class="header-title"><img src="static/logo-label.png" alt="HeartClaws"></div>
   <div class="player-dropdown-wrap">
     <input type="text" id="playerSearch" placeholder="Select player... (All)" autocomplete="off">
     <div class="dropdown-list" id="playerDropdown"></div>
   </div>
   <div class="hb-counter" id="hbCounter">HB: --</div>
   <div class="status-badge" id="statusBadge">Connecting...</div>
+  <img src="static/heartclaws-logo-alpha.png" alt="HeartClaws" class="header-logo-left">
   <a class="match-link" href="match.html">Private Match</a>
 </div>
 
