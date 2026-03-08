@@ -8,6 +8,7 @@ import logging
 import random
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import urljoin
 from dataclasses import asdict, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -76,6 +77,60 @@ world_ws_clients: set[WebSocket] = set()
 
 HEARTBEAT_INTERVAL_SECONDS = 10  # 10s for testing, 300 (5min) for production
 
+# Ranking of Claws integration — auto-report season results
+RANKING_OF_CLAWS_API = "http://localhost:5013"
+
+
+RANKING_REPORT_INTERVAL = 50  # report scores every N heartbeats
+
+
+async def _report_scores_to_ranking(state: GameState) -> None:
+    """POST each player's composite score to Ranking of Claws /api/report/game.
+
+    No win/loss — open world is persistent. We report the composite score
+    (territory 30%, economy 25%, military 20%, longevity 15%, influence 10%)
+    as the ELO value so the GameLeaderboard ranks agents by best score.
+    """
+    try:
+        import httpx
+    except ImportError:
+        logger.warning("httpx not installed — skipping Ranking of Claws reporting")
+        return
+
+    leaderboard = compute_leaderboard(state)
+    if not leaderboard:
+        return
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        for entry in leaderboard:
+            player = state.players.get(entry["player_id"])
+            if not player or not player.gateway_id:
+                continue
+
+            # Composite score (0-100) scaled to ELO range (1000-2000)
+            score = entry["composite"]
+            elo_score = 1000 + round(score * 10)  # 0→1000, 100→2000
+
+            payload = {
+                "gateway_id": player.gateway_id,
+                "agent_name": player.name,
+                "game": "heartclaws",
+                "result": "draw",  # no win/loss in open world
+                "elo_before": elo_score,
+                "elo_after": elo_score,
+                "match_id": f"heartclaws-hb-{state.heartbeat}",
+            }
+            try:
+                resp = await client.post(f"{RANKING_OF_CLAWS_API}/api/report/game", json=payload)
+                if resp.status_code == 200:
+                    logger.info("Reported score %.1f (ELO %d) for %s to Ranking of Claws",
+                                score, elo_score, player.name)
+                else:
+                    logger.warning("Ranking report failed for %s: %d %s",
+                                   player.name, resp.status_code, resp.text[:200])
+            except Exception as exc:
+                logger.warning("Ranking report error for %s: %s", player.name, exc)
+
 
 # ---------------------------------------------------------------------------
 # Background heartbeat loop
@@ -104,6 +159,10 @@ async def open_world_heartbeat_loop():
 
         # 3. Check season boundary
         season_result = check_season_boundary(open_world_state)
+
+        # 3b. Report scores to Ranking of Claws periodically
+        if open_world_state.heartbeat % RANKING_REPORT_INTERVAL == 0:
+            asyncio.create_task(_report_scores_to_ranking(open_world_state))
 
         # 4. Auto-save
         _ensure_saves_dir()
@@ -935,6 +994,8 @@ def world_heartbeat() -> dict:
     resp = {"heartbeat": result.heartbeat, "events": _serialize(result.events)}
     if season_result:
         resp["season"] = season_result
+    if state.heartbeat % RANKING_REPORT_INTERVAL == 0:
+        asyncio.create_task(_report_scores_to_ranking(state))
     return resp
 
 
