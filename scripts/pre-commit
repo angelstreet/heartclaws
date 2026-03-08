@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+
+echo "🧪 Running HeartClaws smoke tests..."
+cd "$(git rev-parse --show-toplevel)"
+python3 -m pytest tests/ --ignore=tests/test_api_integration.py -q --tb=short
+
+echo "✅ All smoke tests passed."
