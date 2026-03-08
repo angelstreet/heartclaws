@@ -47,6 +47,9 @@ class PlayerState:
     biomass: int = 0
     diplomacy_stance: dict[str, DiplomaticStance] = field(default_factory=dict)
     subagent_ids: list[str] = field(default_factory=list)
+    spawn_heartbeat: int = 0
+    last_active_heartbeat: int = 0
+    gateway_id: str | None = None
 
 
 @dataclass
@@ -133,6 +136,8 @@ class GameState:
     actions_pending: list[Action] = field(default_factory=list)
     event_log: list[Event] = field(default_factory=list)
     id_counter: int = 0
+    open_world: bool = False
+    player_counter: int = 0
 
 
 def next_id(state: GameState, prefix: str) -> str:
