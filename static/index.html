@@ -1506,14 +1506,27 @@
     });
   }
 
+  // ---- API Base URL (adapts to proxy prefix like /heartclaws/) ----
+  var API_BASE = (function() {
+    // Detect base path from current URL (e.g. /heartclaws/ -> /heartclaws)
+    var path = window.location.pathname.replace(/\/+$/, '');
+    // If served at root, path is empty; otherwise strip trailing index.html etc.
+    if (path.endsWith('.html')) path = path.substring(0, path.lastIndexOf('/'));
+    return path;
+  })();
+
+  function apiUrl(endpoint) {
+    return API_BASE + endpoint;
+  }
+
   // ---- OW REST API ----
   async function createOpenWorld(seed) {
-    var r = await fetch('/world/create?seed=' + seed, {method: 'POST'});
+    var r = await fetch(apiUrl('/world/create?seed=' + seed), {method: 'POST'});
     return r.json();
   }
 
   async function joinOpenWorld(name) {
-    var r = await fetch('/world/join', {
+    var r = await fetch(apiUrl('/world/join'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: name})
@@ -1522,17 +1535,17 @@
   }
 
   async function runHeartbeat() {
-    var r = await fetch('/world/heartbeat', {method: 'POST'});
+    var r = await fetch(apiUrl('/world/heartbeat'), {method: 'POST'});
     return r.json();
   }
 
   async function getWorldState() {
-    var r = await fetch('/world/state');
+    var r = await fetch(apiUrl('/world/state'));
     return r.json();
   }
 
   async function getLeaderboard() {
-    var r = await fetch('/world/leaderboard');
+    var r = await fetch(apiUrl('/world/leaderboard'));
     return r.json();
   }
 
