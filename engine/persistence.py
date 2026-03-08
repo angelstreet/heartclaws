@@ -9,6 +9,7 @@ from .config import GameConfig
 from .enums import (
     ActionStatus,
     ActionType,
+    BiomeType,
     DiplomaticStance,
     ResourceType,
     SectorType,
@@ -18,6 +19,7 @@ from .models import (
     Action,
     Event,
     GameState,
+    Message,
     PlayerState,
     ResourceNode,
     SectorState,
@@ -49,6 +51,7 @@ def _resource_node(d: dict) -> ResourceNode:
 
 
 def _sector_state(d: dict) -> SectorState:
+    biome_raw = d.get("biome")
     return SectorState(
         sector_id=d["sector_id"],
         name=d["name"],
@@ -58,6 +61,7 @@ def _sector_state(d: dict) -> SectorState:
         structure_ids=d.get("structure_ids", []),
         controller_player_id=d.get("controller_player_id"),
         safe_owner_player_id=d.get("safe_owner_player_id"),
+        biome=BiomeType(biome_raw) if biome_raw else None,
     )
 
 
@@ -84,6 +88,11 @@ def _player_state(d: dict) -> PlayerState:
             k: DiplomaticStance(v) for k, v in d.get("diplomacy_stance", {}).items()
         },
         subagent_ids=d.get("subagent_ids", []),
+        spawn_heartbeat=d.get("spawn_heartbeat", 0),
+        last_active_heartbeat=d.get("last_active_heartbeat", 0),
+        gateway_id=d.get("gateway_id"),
+        structures_destroyed=d.get("structures_destroyed", 0),
+        structures_lost=d.get("structures_lost", 0),
     )
 
 
@@ -157,6 +166,16 @@ def _game_config(d: dict) -> GameConfig:
     return GameConfig(**d)
 
 
+def _message(d: dict) -> Message:
+    return Message(
+        message_id=d["message_id"],
+        from_player_id=d["from_player_id"],
+        to_player_id=d["to_player_id"],
+        content=d["content"],
+        heartbeat=d["heartbeat"],
+    )
+
+
 def _game_state(d: dict) -> GameState:
     return GameState(
         game_id=d["game_id"],
@@ -169,7 +188,13 @@ def _game_state(d: dict) -> GameState:
         structures={k: _structure_state(v) for k, v in d.get("structures", {}).items()},
         actions_pending=[_action(a) for a in d.get("actions_pending", [])],
         event_log=[_event(e) for e in d.get("event_log", [])],
+        messages=[_message(m) for m in d.get("messages", [])],
         id_counter=d.get("id_counter", 0),
+        open_world=d.get("open_world", False),
+        player_counter=d.get("player_counter", 0),
+        season_history=d.get("season_history", []),
+        world_events_active=d.get("world_events_active", []),
+        player_elo=d.get("player_elo", {}),
     )
 
 

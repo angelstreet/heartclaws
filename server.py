@@ -127,21 +127,42 @@ def _ensure_saves_dir():
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_WORLD_SEED = 2026
+
+
 @asynccontextmanager
 async def lifespan(app):
     global open_world_state
-    # Try to load existing world save on startup
+    _ensure_saves_dir()
+
+    # Try to restore from save
     save_path = Path(open_world_save_path)
     if save_path.exists():
         try:
             open_world_state = load_game(open_world_save_path)
-            logger.info("Loaded open world from %s (heartbeat %d)", open_world_save_path, open_world_state.heartbeat)
+            logger.info(
+                "Restored open world from %s (heartbeat %d, %d players)",
+                open_world_save_path,
+                open_world_state.heartbeat,
+                len(open_world_state.players),
+            )
         except Exception as e:
-            logger.warning("Failed to load open world save: %s", e)
+            logger.warning("Failed to load open world save: %s — creating fresh world", e)
+            open_world_state = None
+
+    # Auto-create if no world exists
+    if open_world_state is None:
+        open_world_state = init_open_world(DEFAULT_WORLD_SEED)
+        save_game(open_world_state, open_world_save_path)
+        logger.info("Created fresh open world (seed %d)", DEFAULT_WORLD_SEED)
 
     # Start background heartbeat
     task = asyncio.create_task(open_world_heartbeat_loop())
     yield
+    # Save on shutdown
+    if open_world_state is not None:
+        save_game(open_world_state, open_world_save_path)
+        logger.info("Saved open world on shutdown (heartbeat %d)", open_world_state.heartbeat)
     task.cancel()
     try:
         await task
