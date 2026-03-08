@@ -180,6 +180,29 @@ class TestScanAndHistory:
         assert isinstance(data["events"], list)
 
 
+class TestWorldStats:
+    def test_stats_endpoint(self, client):
+        r = client.get("/world/stats")
+        assert r.status_code == 200
+        data = r.json()
+        assert "heartbeat" in data
+        assert "total_players_alltime" in data
+        assert "alive_players" in data
+        assert "active_players" in data
+        assert "inactive_players" in data
+        assert "total_structures" in data
+        assert "structures_by_type" in data
+        assert "total_sectors" in data
+        assert data["total_sectors"] == 64
+        assert "controlled_sectors" in data
+        assert "unclaimed_sectors" in data
+        assert "total_actions" in data
+        assert "total_messages" in data
+        assert "season" in data
+        assert "players" in data
+        assert isinstance(data["players"], list)
+
+
 class TestErrorHandling:
     def test_invalid_player_state(self, client):
         r = client.get("/world/state/nonexistent_player")

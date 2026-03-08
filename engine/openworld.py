@@ -229,6 +229,11 @@ def leave_open_world(state: GameState, player_id: str) -> dict:
     }
 
 
+INACTIVE_DECAY_THRESHOLD = 30  # heartbeats before structures start decaying
+INACTIVE_CLEANUP_THRESHOLD = 25920  # heartbeats before full removal (~3 days at 10s)
+# At 300s production heartbeats: use 864 instead
+
+
 def apply_open_world_decay(state: GameState) -> list:
     """Called each heartbeat. Returns list of decay events.
 
@@ -237,12 +242,11 @@ def apply_open_world_decay(state: GameState) -> list:
     - Structures at 0 HP are destroyed
     """
     decay_events: list[dict] = []
-    inactive_threshold = 30
 
     # Find inactive players
     inactive_players = set()
     for pid, player in state.players.items():
-        if state.heartbeat - player.last_active_heartbeat >= inactive_threshold:
+        if state.heartbeat - player.last_active_heartbeat >= INACTIVE_DECAY_THRESHOLD:
             inactive_players.add(pid)
 
     # Apply decay to inactive players' structures
@@ -276,6 +280,126 @@ def apply_open_world_decay(state: GameState) -> list:
         del state.structures[st_id]
 
     return decay_events
+
+
+def apply_inactive_cleanup(state: GameState) -> list[dict]:
+    """Remove players inactive for 3+ days. Called each heartbeat.
+
+    Triggers leave_open_world (structures become ruins at 50% HP) and emits
+    cleanup event. Returns list of cleanup events.
+    """
+    cleanup_events: list[dict] = []
+    players_to_remove: list[str] = []
+
+    for pid, player in state.players.items():
+        inactive_heartbeats = state.heartbeat - player.last_active_heartbeat
+        if inactive_heartbeats >= INACTIVE_CLEANUP_THRESHOLD:
+            players_to_remove.append(pid)
+
+    for pid in players_to_remove:
+        player = state.players[pid]
+        result = leave_open_world(state, pid)
+        cleanup_events.append({
+            "type": "inactive_cleanup",
+            "player_id": pid,
+            "player_name": player.name,
+            "inactive_heartbeats": state.heartbeat - player.last_active_heartbeat,
+            "abandoned_structures": result.get("abandoned_structures", []),
+        })
+
+    return cleanup_events
+
+
+# ---------------------------------------------------------------------------
+# KPIs / World Stats
+# ---------------------------------------------------------------------------
+
+
+def compute_world_kpis(state: GameState) -> dict:
+    """Compute key performance indicators for the open world."""
+    total_players = state.player_counter  # all-time (includes removed)
+    alive_players = {pid: p for pid, p in state.players.items() if p.alive}
+    active_players = {
+        pid: p for pid, p in alive_players.items()
+        if state.heartbeat - p.last_active_heartbeat < INACTIVE_DECAY_THRESHOLD
+    }
+    inactive_players = {
+        pid: p for pid, p in alive_players.items()
+        if state.heartbeat - p.last_active_heartbeat >= INACTIVE_DECAY_THRESHOLD
+    }
+
+    # Structures
+    total_structures = len(state.structures)
+    structures_by_type: dict[str, int] = {}
+    for st in state.structures.values():
+        t = st.structure_type.value
+        structures_by_type[t] = structures_by_type.get(t, 0) + 1
+
+    # Sectors
+    total_sectors = len(state.world.sectors)
+    controlled_sectors = sum(
+        1 for s in state.world.sectors.values() if s.controller_player_id is not None
+    )
+    unclaimed_sectors = total_sectors - controlled_sectors
+
+    # Actions from event log
+    total_actions = sum(
+        1 for e in state.event_log if e.event_type in ("ACTION_RESOLVED", "ACTION_FAILED")
+    )
+    total_actions_resolved = sum(
+        1 for e in state.event_log if e.event_type == "ACTION_RESOLVED"
+    )
+    total_actions_failed = sum(
+        1 for e in state.event_log if e.event_type == "ACTION_FAILED"
+    )
+
+    # Messages
+    total_messages = len(state.messages)
+
+    # Per-player summary
+    player_summaries = []
+    for pid, p in alive_players.items():
+        sectors_owned = sum(
+            1 for s in state.world.sectors.values() if s.controller_player_id == pid
+        )
+        structures_owned = sum(
+            1 for st in state.structures.values() if st.owner_player_id == pid
+        )
+        inactive_hb = state.heartbeat - p.last_active_heartbeat
+        player_summaries.append({
+            "player_id": pid,
+            "name": p.name,
+            "active": inactive_hb < INACTIVE_DECAY_THRESHOLD,
+            "inactive_heartbeats": inactive_hb,
+            "sectors": sectors_owned,
+            "structures": structures_owned,
+            "metal": p.metal,
+            "data": p.data,
+            "biomass": p.biomass,
+            "spawn_heartbeat": p.spawn_heartbeat,
+            "elo": state.player_elo.get(pid, 1200),
+        })
+
+    return {
+        "heartbeat": state.heartbeat,
+        "world_age_heartbeats": state.heartbeat,
+        "total_players_alltime": total_players,
+        "alive_players": len(alive_players),
+        "active_players": len(active_players),
+        "inactive_players": len(inactive_players),
+        "total_structures": total_structures,
+        "structures_by_type": structures_by_type,
+        "total_sectors": total_sectors,
+        "controlled_sectors": controlled_sectors,
+        "unclaimed_sectors": unclaimed_sectors,
+        "total_actions": total_actions,
+        "actions_resolved": total_actions_resolved,
+        "actions_failed": total_actions_failed,
+        "total_messages": total_messages,
+        "season": (state.heartbeat // 2000) + 1,
+        "world_events_active": len(state.world_events_active),
+        "players": player_summaries,
+    }
 
 
 # ---------------------------------------------------------------------------

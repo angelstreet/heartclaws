@@ -37,7 +37,9 @@ from engine.engine import (
 from engine.enums import ActionType, SectorType, StructureType
 from engine.models import Action, GameState
 from engine.openworld import (
+    apply_inactive_cleanup,
     apply_open_world_decay,
+    compute_world_kpis,
     init_open_world,
     join_open_world,
     leave_open_world,
@@ -90,6 +92,12 @@ async def open_world_heartbeat_loop():
 
         # 1. Apply decay
         apply_open_world_decay(open_world_state)
+
+        # 1b. Cleanup inactive players (3+ days)
+        cleanup = apply_inactive_cleanup(open_world_state)
+        if cleanup:
+            logger.info("Cleaned up %d inactive players: %s",
+                        len(cleanup), [c["player_id"] for c in cleanup])
 
         # 2. Run heartbeat (same engine as matches)
         hb_result = run_heartbeat(open_world_state)
@@ -972,6 +980,13 @@ def world_messages(player_id: str) -> list:
     if player_id not in state.players:
         raise HTTPException(status_code=400, detail=f"Player '{player_id}' not found")
     return get_messages(state, player_id)
+
+
+@app.get("/world/stats")
+def world_stats() -> dict:
+    """World KPIs: active/total players, structures, actions, economy."""
+    state = _get_world()
+    return compute_world_kpis(state)
 
 
 @app.get("/world/history")
