@@ -91,8 +91,8 @@ MODELS: dict[str, ModelConfig] = {
         api_key_env="OPENROUTER_API_KEY",
     ),
     "grok": ModelConfig(
-        name="Grok 3",
-        model_id="x-ai/grok-3",
+        name="Grok Code",
+        model_id="x-ai/grok-code-fast-1",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
