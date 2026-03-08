@@ -471,11 +471,21 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         log.debug("%s (%s): no actions returned", agent.model.name, agent.player_id)
         return
 
+    # Normalize common action_type aliases LLMs hallucinate
+    ACTION_ALIASES = {
+        "SCAN": "SCAN_SECTOR",
+        "BUILD": "BUILD_STRUCTURE",
+        "ATTACK": "ATTACK_STRUCTURE",
+        "REMOVE": "REMOVE_STRUCTURE",
+        "TRANSFER": "TRANSFER_RESOURCE",
+        "POLICY": "SET_POLICY",
+    }
+
     # Submit each action
     accepted = []
     rejected = []
     for action in actions[:5]:  # Max 5 per heartbeat
-        action_type = action.get("action_type", "")
+        action_type = ACTION_ALIASES.get(action.get("action_type", ""), action.get("action_type", ""))
         payload = action.get("payload", {})
         result = await hc_post(client, f"/games/{game_id}/actions", {
             "player_id": agent.player_id,
