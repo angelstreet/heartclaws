@@ -176,10 +176,17 @@ Format: [{"action_type": "...", "payload": {...}}, ...]
 
 ACTIONS & PAYLOADS:
 - BUILD_STRUCTURE: {"sector_id": "H_x_y", "structure_type": "TYPE"}
-  Types: TOWER (4E, expand territory), EXTRACTOR (4E, mine METAL — sector MUST have METAL resource node),
-  DATA_HARVESTER (4E, mine DATA — needs DATA node), BIO_CULTIVATOR (4E, mine BIOMASS — needs BIOMASS node),
-  REACTOR (8E, +energy income), ATTACK_NODE (6E, required to attack), OUTPOST (3E, cheap influence),
-  SHIELD_GENERATOR (6E, defense), TRADE_HUB (5E, trade bonus)
+  Types (cost = Energy + Metal + Data + Biomass):
+  EXTRACTOR (4E+6M, mine METAL — sector MUST have METAL resource node, +3 metal/turn)
+  DATA_HARVESTER (4E+4M+2D, mine DATA — needs DATA node, +3 data/turn)
+  BIO_CULTIVATOR (4E+4M+3B, mine BIOMASS — needs BIOMASS node, +3 biomass/turn)
+  TOWER (4E+5M, expand territory to adjacent sector, +3 influence)
+  REACTOR (8E+10M, +8 energy income/turn)
+  ATTACK_NODE (6E+9M+1D, required before attacking)
+  SHIELD_GENERATOR (6E+8M+5B, defense)
+  TRADE_HUB (7E+10M+3D, trade bonus)
+  OUTPOST (10E+15M+2D, strong influence+energy)
+  You start with 20 metal, 5 data, 0 biomass. Check your resources before building!
 - ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"} — need ATTACK_NODE in target/adjacent sector, cannot attack allies or spawn-protected players (first 10 heartbeats)
 - SET_POLICY: {"target_player_id": "pN", "stance": "ALLY|NEUTRAL|HOSTILE"}
 - TRANSFER_RESOURCE: {"target_player_id": "pN", "resource_type": "METAL|DATA|BIOMASS", "amount": N}
