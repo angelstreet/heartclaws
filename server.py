@@ -889,6 +889,21 @@ def world_action(request: dict) -> dict:
     }
 
 
+@app.post("/world/heartbeat")
+def world_heartbeat() -> dict:
+    """Manually trigger a heartbeat for the open world."""
+    state = _get_world()
+    apply_open_world_decay(state)
+    result = run_heartbeat(state)
+    season_result = check_season_boundary(state)
+    _ensure_saves_dir()
+    save_game(state, open_world_save_path)
+    resp = {"heartbeat": result.heartbeat, "events": _serialize(result.events)}
+    if season_result:
+        resp["season"] = season_result
+    return resp
+
+
 @app.get("/world/leaderboard")
 def world_leaderboard() -> list:
     """Current leaderboard."""
