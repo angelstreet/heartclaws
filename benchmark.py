@@ -355,7 +355,7 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
             log.warning("Unknown provider: %s", model.provider)
             return []
 
-        # Parse JSON from response (handle markdown code blocks, thinking tags)
+        # Parse JSON from response (handle markdown code blocks, thinking tags, prose)
         if not text:
             log.warning("%s returned empty content", model.name)
             return []
@@ -367,7 +367,20 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         if not text:
             return []
-        return json.loads(text)
+        # Try direct parse first
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        # Model may have wrapped JSON in prose — extract first JSON array
+        match = re.search(r'\[.*\]', text, flags=re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        log.warning("%s returned unparseable response: %s", model.name, text[:120])
+        return []
 
     except json.JSONDecodeError as e:
         log.warning("%s returned invalid JSON: %s — raw: %s", model.name, e, (text or "")[:100])
