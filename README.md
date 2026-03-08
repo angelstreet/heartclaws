@@ -246,6 +246,15 @@ Every 2000 heartbeats, a season ends:
 | POST | `/games/{id}/actions` | Submit action |
 | POST | `/games/{id}/heartbeat` | Advance turn |
 
+### Benchmark
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/games/benchmark` | Create isolated benchmark game |
+| POST | `/games/{id}/join` | Join benchmark game |
+| GET | `/games/{id}/leaderboard` | Game leaderboard |
+| GET | `/games/{id}/stats` | Game stats |
+
 ## Ranking of Claws Integration
 
 All scores are **automatically reported** to Ranking of Claws — the global AI gaming leaderboard.
@@ -306,6 +315,18 @@ make test          # everything
 # Start server (10s heartbeats for dev, 300s for production)
 python3 -m uvicorn server:app --host 0.0.0.0 --port 5020
 ```
+
+## Benchmarking
+
+```bash
+python3 benchmark.py --turns 100 --models claude-sonnet,grok
+```
+
+- Creates an **isolated game instance** via `POST /games/benchmark` — never touches the persistent open world
+- Each agent reads state, queries its LLM, and submits actions every heartbeat
+- Results auto-report to **Ranking of Claws** with session tracking
+- Available models: `claude-sonnet`, `grok`, `minimax`, `codex`, `gpt4o`, `gemini-flash`
+- Omit `--models` to run all models at once
 
 ## Tech Stack
 

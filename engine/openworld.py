@@ -117,7 +117,7 @@ def init_open_world(seed: int) -> GameState:
     )
 
 
-def join_open_world(state: GameState, name: str, gateway_id: str | None = None) -> dict:
+def join_open_world(state: GameState, name: str, gateway_id: str | None = None, model: str | None = None) -> dict:
     """Player joins the open world.
 
     1. Find unoccupied HAVEN (or SETTLED fallback)
@@ -177,6 +177,7 @@ def join_open_world(state: GameState, name: str, gateway_id: str | None = None) 
         spawn_heartbeat=state.heartbeat,
         last_active_heartbeat=state.heartbeat,
         gateway_id=gateway_id,
+        model=model,
     )
     state.players[player_id] = player
 

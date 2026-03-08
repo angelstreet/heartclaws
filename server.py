@@ -119,7 +119,14 @@ async def _report_scores_to_ranking(state: GameState) -> None:
                 "elo_before": elo_score,
                 "elo_after": elo_score,
                 "match_id": f"heartclaws-hb-{state.heartbeat}",
-                "session_name": "World",
+                "session_id": state.session_id or "world",
+                "session_name": state.session_name or "World",
+                "model": player.model or None,
+                "score_territory": entry.get("territory", 0),
+                "score_economy": entry.get("economy", 0),
+                "score_military": entry.get("military", 0),
+                "score_influence": entry.get("influence", 0),
+                "score_composite": score,
             }
             try:
                 resp = await client.post(f"{RANKING_OF_CLAWS_API}/api/report/game", json=payload)
@@ -786,6 +793,7 @@ class LoadGameRequest(BaseModel):
 class WorldJoinRequest(BaseModel):
     name: str
     gateway_id: str | None = None
+    model: str | None = None
 
 
 class WorldLeaveRequest(BaseModel):
@@ -800,6 +808,56 @@ class WorldLeaveRequest(BaseModel):
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "active_games": len(games)}
+
+
+# -- Create benchmark game (open-world map, dynamic join, isolated) --------
+
+@app.post("/games/benchmark")
+def create_benchmark_game(seed: int = 42, session_id: str = "", session_name: str = "") -> dict:
+    """Create an open-world-sized game for benchmarking. Stored in games dict, NOT the persistent world."""
+    state = init_open_world(seed)
+    state.game_id = f"bm_{seed}"
+    if session_id:
+        state.session_id = session_id
+    if session_name:
+        state.session_name = session_name
+    games[state.game_id] = state
+    return {
+        "game_id": state.game_id,
+        "heartbeat": state.heartbeat,
+        "sector_count": len(state.world.sectors),
+        "session_id": session_id,
+        "session_name": session_name,
+    }
+
+
+@app.post("/games/{game_id}/join")
+def game_join(game_id: str, request: WorldJoinRequest) -> dict:
+    """Join a benchmark/open-world game by game_id."""
+    state = _get_game(game_id)
+    result = join_open_world(state, request.name, request.gateway_id, request.model)
+    return result
+
+
+@app.get("/games/{game_id}/leaderboard")
+def game_leaderboard(game_id: str) -> list:
+    """Leaderboard for a specific game instance."""
+    state = _get_game(game_id)
+    return compute_leaderboard(state)
+
+
+@app.get("/games/{game_id}/stats")
+def game_stats(game_id: str) -> dict:
+    """Stats for a specific game instance."""
+    state = _get_game(game_id)
+    stats = get_open_world_stats(state.world)
+    return {
+        "game_id": state.game_id,
+        "heartbeat": state.heartbeat,
+        "alive_players": len([p for p in state.players.values() if p.alive]),
+        "total_structures": len(state.structures),
+        **stats,
+    }
 
 
 # -- Create game -----------------------------------------------------------
@@ -887,7 +945,7 @@ def post_action(game_id: str, req: ActionRequest) -> ActionResponse:
 # -- Heartbeat -------------------------------------------------------------
 
 @app.post("/games/{game_id}/heartbeat")
-def post_heartbeat(game_id: str) -> dict:
+async def post_heartbeat(game_id: str) -> dict:
     state = _get_game(game_id)
 
     # Auto-play AI opponent before resolving heartbeat
@@ -899,6 +957,11 @@ def post_heartbeat(game_id: str) -> dict:
             submit_action(state, a)
 
     result = run_heartbeat(state)
+
+    # Report scores to Ranking of Claws for benchmark games
+    if state.session_id and state.heartbeat % RANKING_REPORT_INTERVAL == 0:
+        asyncio.create_task(_report_scores_to_ranking(state))
+
     return {
         "heartbeat": result.heartbeat,
         "events": _serialize(result.events),
@@ -967,10 +1030,14 @@ def _get_world() -> GameState:
 
 
 @app.post("/world/create")
-def create_world(seed: int = 42) -> dict:
+def create_world(seed: int = 42, session_id: str = "", session_name: str = "") -> dict:
     """Create persistent open world. Returns world stats."""
     global open_world_state
     open_world_state = init_open_world(seed)
+    if session_id:
+        open_world_state.session_id = session_id
+    if session_name:
+        open_world_state.session_name = session_name
     _ensure_saves_dir()
     save_game(open_world_state, open_world_save_path)
     stats = get_open_world_stats(open_world_state.world)
@@ -982,11 +1049,12 @@ def create_world(seed: int = 42) -> dict:
     }
 
 
+
 @app.post("/world/join")
 def world_join(request: WorldJoinRequest) -> dict:
     """Join the open world. Returns credentials + spawn info."""
     state = _get_world()
-    result = join_open_world(state, request.name, request.gateway_id)
+    result = join_open_world(state, request.name, request.gateway_id, request.model)
     _ensure_saves_dir()
     save_game(state, open_world_save_path)
     return result
@@ -1078,7 +1146,7 @@ def world_action(request: dict) -> dict:
 
 
 @app.post("/world/heartbeat")
-def world_heartbeat() -> dict:
+async def world_heartbeat() -> dict:
     """Manually trigger a heartbeat for the open world."""
     state = _get_world()
     apply_open_world_decay(state)

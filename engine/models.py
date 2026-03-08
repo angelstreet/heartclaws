@@ -50,6 +50,7 @@ class PlayerState:
     spawn_heartbeat: int = 0
     last_active_heartbeat: int = 0
     gateway_id: str | None = None
+    model: str | None = None
     structures_destroyed: int = 0
     structures_lost: int = 0
 
@@ -153,6 +154,8 @@ class GameState:
     season_history: list[dict] = field(default_factory=list)
     world_events_active: list[dict] = field(default_factory=list)
     player_elo: dict[str, int] = field(default_factory=dict)
+    session_id: str = ""
+    session_name: str = ""
 
 
 def next_id(state: GameState, prefix: str) -> str:
