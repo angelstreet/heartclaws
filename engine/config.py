@@ -138,6 +138,42 @@ STRUCTURE_CATALOG: dict[StructureType, dict] = {
         "data_cost": 0,
         "biomass_cost": 3,
     },
+    StructureType.OUTPOST: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 60,
+        "influence": 4,
+        "energy_income_bonus": 8,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 3,
+        "metal_cost": 15,
+        "data_cost": 2,
+        "biomass_cost": 0,
+    },
+    StructureType.SHIELD_GENERATOR: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 25,
+        "influence": 0,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 2,
+        "metal_cost": 8,
+        "data_cost": 0,
+        "biomass_cost": 5,
+    },
+    StructureType.TRADE_HUB: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 35,
+        "influence": 2,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 2,
+        "metal_cost": 10,
+        "data_cost": 3,
+        "biomass_cost": 0,
+    },
 }
 
 BUILD_ENERGY_COSTS: dict[StructureType, int] = {
@@ -150,6 +186,9 @@ BUILD_ENERGY_COSTS: dict[StructureType, int] = {
     StructureType.ATTACK_NODE: 6,
     StructureType.DATA_HARVESTER: 4,
     StructureType.BIO_CULTIVATOR: 4,
+    StructureType.OUTPOST: 10,
+    StructureType.SHIELD_GENERATOR: 6,
+    StructureType.TRADE_HUB: 7,
 }
 
 ACTION_ENERGY_COSTS: dict[ActionType, int] = {

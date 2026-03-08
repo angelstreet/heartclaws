@@ -43,13 +43,23 @@ def get_action_energy_cost(action: Action, state: GameState | None = None) -> in
             return 0
         return BUILD_ENERGY_COSTS.get(st, 0)
 
-    # Ally transfer costs 0 energy
+    # Transfer energy cost modifiers
     if action.action_type == ActionType.TRANSFER_RESOURCE and state is not None:
         player = state.players.get(action.issuer_player_id)
         target_pid = action.payload.get("target_player_id")
         if player is not None and target_pid is not None:
+            # Ally transfer costs 0 energy
             stance = player.diplomacy_stance.get(target_pid, DiplomaticStance.NEUTRAL)
             if stance == DiplomaticStance.ALLY:
+                return 0
+            # Trade Hub: if source player has an active TRADE_HUB anywhere, transfer costs 0
+            has_trade_hub = any(
+                s.owner_player_id == action.issuer_player_id
+                and s.structure_type == StructureType.TRADE_HUB
+                and s.active
+                for s in state.structures.values()
+            )
+            if has_trade_hub:
                 return 0
 
     return ACTION_ENERGY_COSTS.get(action.action_type, 0)
