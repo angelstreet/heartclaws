@@ -64,6 +64,8 @@ app.add_middleware(
 
 # In-memory store of active games
 games: dict[str, GameState] = {}
+# AI opponents: game_id -> (player_id, strategy_callable)
+game_ai: dict[str, tuple[str, any]] = {}
 
 # ---------------------------------------------------------------------------
 # Static files
@@ -464,6 +466,7 @@ async def ws_match(websocket: WebSocket):
 class CreateGameRequest(BaseModel):
     players: list[str]
     seed: int | None = None
+    ai_opponent: str | None = None  # e.g. "aggressor" — auto-plays p2 on heartbeat
 
 
 class CreateGameResponse(BaseModel):
@@ -508,6 +511,17 @@ def create_game(req: CreateGameRequest) -> CreateGameResponse:
     seed = req.seed if req.seed is not None else random.randint(0, 2**31)
     state = init_game(config=None, players=req.players, seed=seed)
     games[state.game_id] = state
+
+    # Register AI opponent if requested
+    if req.ai_opponent:
+        try:
+            ai_strat = resolve_strategy(req.ai_opponent)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # AI controls the last player (p2)
+        ai_player = req.players[-1]
+        game_ai[state.game_id] = (ai_player, ai_strat, random.Random(seed))
+
     return CreateGameResponse(
         game_id=state.game_id,
         heartbeat=state.heartbeat,
@@ -577,6 +591,15 @@ def post_action(game_id: str, req: ActionRequest) -> ActionResponse:
 @app.post("/games/{game_id}/heartbeat")
 def post_heartbeat(game_id: str) -> dict:
     state = _get_game(game_id)
+
+    # Auto-play AI opponent before resolving heartbeat
+    ai_info = game_ai.get(game_id)
+    if ai_info:
+        ai_player, ai_strat, ai_rng = ai_info
+        ai_actions = ai_strat(state, ai_player, ai_rng)
+        for a in ai_actions:
+            submit_action(state, a)
+
     result = run_heartbeat(state)
     return {
         "heartbeat": result.heartbeat,

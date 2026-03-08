@@ -18,21 +18,21 @@ Public: `https://65.108.14.251:8080/heartclaws`
 ## Game Loop
 
 ```
-1. Create game       POST /games
-2. Read state         GET  /games/{id}/player/{player_id}
+1. Create game       POST /games  {"players":["p1","p2"], "ai_opponent":"aggressor"}
+2. Read state         GET  /games/{id}/player/p1
 3. Read map           GET  /games/{id}/map
-4. Submit actions     POST /games/{id}/actions  (1-3 per turn)
-5. Advance turn       POST /games/{id}/heartbeat
+4. Submit actions     POST /games/{id}/actions  (1-3 per turn, as p1)
+5. Advance turn       POST /games/{id}/heartbeat  (AI plays p2 automatically)
 6. Repeat from step 2
 ```
 
-## Quick Start
+## Quick Start (vs AI)
 
 ```bash
-# Create a 2-player game
+# Create game — you are p1, AI plays p2 automatically
 GAME=$(curl -s -X POST http://localhost:5020/games \
   -H "Content-Type: application/json" \
-  -d '{"players": ["p1", "p2"], "seed": 42}' | jq -r '.game_id')
+  -d '{"players": ["p1", "p2"], "ai_opponent": "aggressor"}' | jq -r '.game_id')
 echo "Game: $GAME"
 
 # Check your state
@@ -41,6 +41,10 @@ curl -s http://localhost:5020/games/$GAME/player/p1 | jq .
 # View the map
 curl -s http://localhost:5020/games/$GAME/map | jq .
 ```
+
+AI opponent strategies: `random`, `expansionist`, `economist`, `aggressor`, `turtle`
+
+When `ai_opponent` is set, the server auto-plays p2 on every heartbeat. You only submit actions for p1.
 
 ## World Map
 
@@ -161,12 +165,12 @@ Submit 1-3 actions per turn. More actions = more energy spent = more risk.
 ## Example Full Game Session
 
 ```bash
-# Setup
+# Create game vs AI aggressor
 GAME=$(curl -s -X POST http://localhost:5020/games \
   -H "Content-Type: application/json" \
-  -d '{"players": ["p1", "p2"]}' | jq -r '.game_id')
+  -d '{"players": ["p1", "p2"], "ai_opponent": "aggressor"}' | jq -r '.game_id')
 
-# Turn 1: Build extractor + expand
+# Turn 1: Build extractor on metal node + expand
 curl -s -X POST http://localhost:5020/games/$GAME/actions \
   -H "Content-Type: application/json" \
   -d '{"player_id": "p1", "action_type": "BUILD_STRUCTURE", "payload": {"sector_id": "F1", "structure_type": "EXTRACTOR"}}'
@@ -175,22 +179,12 @@ curl -s -X POST http://localhost:5020/games/$GAME/actions \
   -H "Content-Type: application/json" \
   -d '{"player_id": "p1", "action_type": "BUILD_STRUCTURE", "payload": {"sector_id": "F2", "structure_type": "TOWER"}}'
 
-# Resolve turn
+# Resolve turn (AI auto-plays p2)
 curl -s -X POST http://localhost:5020/games/$GAME/heartbeat | jq '.heartbeat, (.events | length)'
 
 # Check state after turn 1
 curl -s http://localhost:5020/games/$GAME/player/p1 | jq '{metal: .player.metal, energy: .player.energy_reserve, sectors: .controlled_sectors}'
+
+# See what AI did
+curl -s http://localhost:5020/games/$GAME/map | jq '.sectors | to_entries[] | select(.value.controller_player_id == "p2") | .key'
 ```
-
-## Two-Agent Play
-
-For AI vs AI, create one game and have two agents alternate:
-
-```
-Agent A (p1):  read state -> decide -> submit actions
-Agent B (p2):  read state -> decide -> submit actions
-Coordinator:   POST /heartbeat to advance turn
-Repeat.
-```
-
-Each agent only submits actions for their own player_id. A coordinator script or third agent advances the heartbeat after both have submitted.
