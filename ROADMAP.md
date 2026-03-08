@@ -17,45 +17,44 @@ Each phase builds on the previous. Do not skip phases.
 - [x] JSON save/load persistence
 - [x] 34 tests passing (acceptance, determinism, round-trip)
 - [x] CLI interactive game (`play.py`)
-- [x] FastAPI server (`server.py` on port 5013)
+- [x] FastAPI server (`server.py` on port 5020)
 
 ---
 
-## Phase 1 — Log Viewer (Web)
+## Phase 1 — Log Viewer (Web) (DONE)
 **Goal:** A simple web page to watch agents play in real-time through event logs.
 
 ### Tasks
-- [ ] Auto-play mode: engine runs N heartbeats with 2+ AI agents making moves
-- [ ] WebSocket endpoint streaming events as they happen
-- [ ] Simple HTML/JS page (no framework) showing:
+- [x] Auto-play mode: engine runs N heartbeats with 2+ AI agents making moves
+- [x] WebSocket endpoint streaming events as they happen
+- [x] Simple HTML/JS page (no framework) showing:
   - Live event feed (scrolling log with timestamps)
   - Color-coded by player (P1 green, P2 red)
   - Event type icons/badges (build, attack, destroy, etc.)
   - Current heartbeat counter
-- [ ] Pause/resume/step controls
-- [ ] Game state summary panel (resources, sector count per player)
-- [ ] Serve from FastAPI static files on port 5013
+- [x] Pause/resume/step controls
+- [x] Game state summary panel (resources, sector count per player)
+- [x] Serve from FastAPI static files on port 5020
 
 ### Tech
 - Vanilla HTML + CSS + JS (no build step)
 - WebSocket for live streaming
-- SSE as fallback
 
 ---
 
-## Phase 2 — AI Agent Strategies
+## Phase 2 — AI Agent Strategies (DONE)
 **Goal:** Multiple AI personality types that make interesting games to watch.
 
 ### Tasks
-- [ ] Agent interface: `decide(state, player_id) -> list[Action]`
-- [ ] Strategy: **Expansionist** — build towers aggressively, claim territory fast
-- [ ] Strategy: **Economist** — prioritize reactors/batteries, maximize energy
-- [ ] Strategy: **Aggressor** — rush attack nodes, target enemy structures
-- [ ] Strategy: **Turtler** — build defensively, high influence in few sectors
-- [ ] Strategy: **Random** — random valid moves (baseline/chaos)
-- [ ] Match runner: pit 2 agents against each other for N heartbeats
-- [ ] Win condition evaluation (most sectors, most energy, or enemy core destroyed)
-- [ ] Stats tracking: win rates per strategy matchup
+- [x] Agent interface: `decide(state, player_id) -> list[Action]`
+- [x] Strategy: **Expansionist** — build towers aggressively, claim territory fast
+- [x] Strategy: **Economist** — prioritize reactors/batteries, maximize energy
+- [x] Strategy: **Aggressor** — rush attack nodes, target enemy structures
+- [x] Strategy: **Turtler** — build defensively, high influence in few sectors
+- [x] Strategy: **Random** — random valid moves (baseline/chaos)
+- [x] Match runner: pit 2 agents against each other for N heartbeats
+- [x] Win condition evaluation (most sectors, most energy, or enemy core destroyed)
+- [x] Stats tracking per strategy matchup
 
 ---
 
