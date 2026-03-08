@@ -24,6 +24,23 @@ def _has_active_shield_in_sector(state: GameState, owner_player_id: str, sector_
     return False
 
 
+def _has_active_mech_bay_in_sector(state: GameState, owner_player_id: str, sector_id: str) -> bool:
+    """Check if the owner has an active MECH_BAY in the given sector."""
+    sector = state.world.sectors.get(sector_id)
+    if sector is None:
+        return False
+    for st_id in sector.structure_ids:
+        s = state.structures.get(st_id)
+        if (
+            s is not None
+            and s.owner_player_id == owner_player_id
+            and s.structure_type == StructureType.MECH_BAY
+            and s.active
+        ):
+            return True
+    return False
+
+
 def _player_has_active_outpost(state: GameState, player_id: str) -> bool:
     """Check if a player has any active OUTPOST structure anywhere."""
     for s in state.structures.values():
@@ -71,6 +88,12 @@ def resolve_attack_structure(state: GameState, action: Action) -> None:
         state, target.owner_player_id, target.sector_id
     ):
         damage = damage // 2
+
+    # Mech Bay: 30% damage reduction if owner has active MECH_BAY in same sector
+    if target.owner_player_id is not None and _has_active_mech_bay_in_sector(
+        state, target.owner_player_id, target.sector_id
+    ):
+        damage = int(damage * 0.7)
 
     target.hp -= damage
 

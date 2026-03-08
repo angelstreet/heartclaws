@@ -99,6 +99,12 @@ def recompute_sector_control(state: GameState, sector_id: str) -> None:
 
     if sector.controller_player_id != old_controller:
         emit_sector_control_changed(state, sector_id, old_controller, sector.controller_player_id)
+        # Track sector gains for expansion scoring
+        new_controller = sector.controller_player_id
+        if new_controller is not None:
+            player = state.players.get(new_controller)
+            if player is not None:
+                player.sectors_gained_history.append(state.heartbeat)
 
 
 def recompute_all_frontier_control(state: GameState) -> None:

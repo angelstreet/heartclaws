@@ -53,6 +53,12 @@ class PlayerState:
     model: str | None = None
     structures_destroyed: int = 0
     structures_lost: int = 0
+    espionage_reveals: dict[str, int] = field(default_factory=dict)  # target_player_id -> expires_at_heartbeat
+    active_trade_deals: list[dict] = field(default_factory=list)  # {target_player_id, resource_type, amount, expires_at}
+    trade_volume_total: int = 0
+    resources_spent_on_structures: int = 0
+    total_resources_produced: int = 0
+    sectors_gained_history: list[int] = field(default_factory=list)  # heartbeat numbers when sectors were gained
 
 
 @dataclass

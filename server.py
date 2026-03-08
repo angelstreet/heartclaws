@@ -126,6 +126,9 @@ async def _report_scores_to_ranking(state: GameState) -> None:
                 "score_economy": entry.get("economy", 0),
                 "score_military": entry.get("military", 0),
                 "score_influence": entry.get("influence", 0),
+                "score_efficiency": entry.get("efficiency", 0),
+                "score_trade": entry.get("trade", 0),
+                "score_expansion": entry.get("expansion", 0),
                 "score_composite": score,
             }
             try:

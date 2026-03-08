@@ -19,11 +19,14 @@ SEASON_LENGTH = 2000  # heartbeats per season (~7 days)
 
 # Leaderboard scoring weights
 SCORE_WEIGHTS = {
-    "territory": 0.30,
-    "economy": 0.25,
-    "military": 0.20,
-    "longevity": 0.15,
+    "territory": 0.25,
+    "economy": 0.20,
+    "military": 0.15,
+    "longevity": 0.10,
     "influence": 0.10,
+    "efficiency": 0.08,
+    "trade": 0.07,
+    "expansion": 0.05,
 }
 
 
@@ -76,7 +79,8 @@ def _compute_player_influence(state: GameState, player_id: str) -> int:
 def compute_player_score(state: GameState, player_id: str) -> dict:
     """Compute multi-dimensional score for a player.
 
-    Returns dict with territory, economy, military, longevity, influence, and composite.
+    Returns dict with territory, economy, military, longevity, influence,
+    efficiency, trade, expansion, and composite.
     """
     player = state.players[player_id]
 
@@ -98,6 +102,22 @@ def compute_player_score(state: GameState, player_id: str) -> dict:
     # Influence: total influence across all structures
     influence = _compute_player_influence(state, player_id)
 
+    # Efficiency: ratio of resources spent on structures to total produced
+    if player.total_resources_produced > 0:
+        efficiency = min(player.resources_spent_on_structures / player.total_resources_produced, 1.0) * 100
+    else:
+        efficiency = 0.0
+
+    # Trade: raw trade volume total (will be normalized by composite)
+    trade = player.trade_volume_total
+
+    # Expansion: sectors gained per heartbeat alive
+    age = state.heartbeat - player.spawn_heartbeat
+    if age > 0:
+        expansion = len(player.sectors_gained_history) / age * 100
+    else:
+        expansion = 0.0
+
     return {
         "player_id": player_id,
         "territory": territory,
@@ -105,7 +125,10 @@ def compute_player_score(state: GameState, player_id: str) -> dict:
         "military": military,
         "longevity": longevity,
         "influence": influence,
-        "composite": _compute_composite(territory, economy, military, longevity, influence),
+        "efficiency": efficiency,
+        "trade": trade,
+        "expansion": expansion,
+        "composite": _compute_composite(territory, economy, military, longevity, influence, efficiency, trade, expansion),
     }
 
 
@@ -115,6 +138,9 @@ def _compute_composite(
     military: int,
     longevity: int,
     influence: int,
+    efficiency: float,
+    trade: float,
+    expansion: float,
 ) -> float:
     """Compute weighted composite score normalized 0-100.
 
@@ -127,6 +153,9 @@ def _compute_composite(
         + military * SCORE_WEIGHTS["military"]
         + longevity * SCORE_WEIGHTS["longevity"]
         + influence * SCORE_WEIGHTS["influence"]
+        + efficiency * SCORE_WEIGHTS["efficiency"]
+        + trade * SCORE_WEIGHTS["trade"]
+        + expansion * SCORE_WEIGHTS["expansion"]
     )
     return min(100.0, max(0.0, raw))
 

@@ -99,7 +99,36 @@ def get_player_view(state: GameState, player_id: str) -> dict:
         for st_id, st in state.structures.items()
     }
 
-    return {
+    # Espionage intel: include target player resources and structures if reveal is active
+    espionage_intel = {}
+    for target_pid, expires_at in player.espionage_reveals.items():
+        if expires_at > state.heartbeat:
+            target_player = state.players.get(target_pid)
+            if target_player is not None:
+                target_structures = [
+                    {
+                        "structure_id": st.structure_id,
+                        "owner_player_id": st.owner_player_id,
+                        "sector_id": st.sector_id,
+                        "structure_type": st.structure_type.value,
+                        "hp": st.hp,
+                        "max_hp": st.max_hp,
+                        "active": st.active,
+                    }
+                    for st in state.structures.values()
+                    if st.owner_player_id == target_pid
+                ]
+                espionage_intel[target_pid] = {
+                    "resources": {
+                        "metal": target_player.metal,
+                        "data": target_player.data,
+                        "biomass": target_player.biomass,
+                    },
+                    "structures": target_structures,
+                    "expires_at": expires_at,
+                }
+
+    result = {
         "player": {
             "player_id": player.player_id,
             "name": player.name,
@@ -118,3 +147,8 @@ def get_player_view(state: GameState, player_id: str) -> dict:
             "spent_this_heartbeat": player.energy_spent_this_heartbeat,
         },
     }
+
+    if espionage_intel:
+        result["espionage_intel"] = espionage_intel
+
+    return result

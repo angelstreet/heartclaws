@@ -15,6 +15,7 @@ class GameConfig:
     max_subagents_per_player: int = 5
     allow_safe_zone_attack: bool = False
     structure_activation_delay_heartbeats: int = 0
+    max_actions_per_heartbeat: int = 5
 
 
 STRUCTURE_CATALOG: dict[StructureType, dict] = {
@@ -174,6 +175,42 @@ STRUCTURE_CATALOG: dict[StructureType, dict] = {
         "data_cost": 3,
         "biomass_cost": 0,
     },
+    StructureType.CIRCUIT_FOUNDRY: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 35,
+        "influence": 2,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 1,
+        "metal_cost": 8,
+        "data_cost": 4,
+        "biomass_cost": 0,
+    },
+    StructureType.MECH_BAY: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 45,
+        "influence": 2,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 2,
+        "metal_cost": 10,
+        "data_cost": 3,
+        "biomass_cost": 5,
+    },
+    StructureType.RESEARCH_LAB: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 30,
+        "influence": 1,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 1,
+        "metal_cost": 5,
+        "data_cost": 6,
+        "biomass_cost": 3,
+    },
 }
 
 BUILD_ENERGY_COSTS: dict[StructureType, int] = {
@@ -189,6 +226,9 @@ BUILD_ENERGY_COSTS: dict[StructureType, int] = {
     StructureType.OUTPOST: 10,
     StructureType.SHIELD_GENERATOR: 6,
     StructureType.TRADE_HUB: 7,
+    StructureType.CIRCUIT_FOUNDRY: 6,
+    StructureType.MECH_BAY: 8,
+    StructureType.RESEARCH_LAB: 5,
 }
 
 ACTION_ENERGY_COSTS: dict[ActionType, int] = {
@@ -200,6 +240,8 @@ ACTION_ENERGY_COSTS: dict[ActionType, int] = {
     ActionType.DEACTIVATE_SUBAGENT: 1,
     ActionType.SET_POLICY: 1,
     ActionType.TRANSFER_RESOURCE: 1,
+    ActionType.ESPIONAGE: 4,
+    ActionType.TRADE_DEAL: 1,
 }
 
 SUBAGENT_DATA_COST: int = 2

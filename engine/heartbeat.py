@@ -26,6 +26,23 @@ from .events import (
 from .models import GameState, HeartbeatResult
 
 
+def _has_active_circuit_foundry(state: GameState, owner_player_id: str, sector_id: str) -> bool:
+    """Check if the owner has an active CIRCUIT_FOUNDRY in the given sector."""
+    sector = state.world.sectors.get(sector_id)
+    if sector is None:
+        return False
+    for st_id in sector.structure_ids:
+        s = state.structures.get(st_id)
+        if (
+            s is not None
+            and s.owner_player_id == owner_player_id
+            and s.structure_type == StructureType.CIRCUIT_FOUNDRY
+            and s.active
+        ):
+            return True
+    return False
+
+
 def run_heartbeat(state: GameState) -> HeartbeatResult:
     # 1. Increment heartbeat
     state.heartbeat += 1
@@ -69,7 +86,11 @@ def run_heartbeat(state: GameState) -> HeartbeatResult:
                     for node in sector.resource_nodes
                 )
                 if has_metal_node:
-                    player.metal += EXTRACTOR_METAL_PER_HEARTBEAT
+                    production = EXTRACTOR_METAL_PER_HEARTBEAT
+                    if _has_active_circuit_foundry(state, pid, structure.sector_id):
+                        production = int(production * 1.2)
+                    player.metal += production
+                    player.total_resources_produced += production
 
             elif structure.structure_type == StructureType.DATA_HARVESTER:
                 has_data_node = any(
@@ -77,7 +98,11 @@ def run_heartbeat(state: GameState) -> HeartbeatResult:
                     for node in sector.resource_nodes
                 )
                 if has_data_node:
-                    player.data += DATA_HARVESTER_DATA_PER_HEARTBEAT
+                    production = DATA_HARVESTER_DATA_PER_HEARTBEAT
+                    if _has_active_circuit_foundry(state, pid, structure.sector_id):
+                        production = int(production * 1.2)
+                    player.data += production
+                    player.total_resources_produced += production
 
             elif structure.structure_type == StructureType.BIO_CULTIVATOR:
                 has_biomass_node = any(
@@ -85,7 +110,48 @@ def run_heartbeat(state: GameState) -> HeartbeatResult:
                     for node in sector.resource_nodes
                 )
                 if has_biomass_node:
-                    player.biomass += BIO_CULTIVATOR_BIOMASS_PER_HEARTBEAT
+                    production = BIO_CULTIVATOR_BIOMASS_PER_HEARTBEAT
+                    if _has_active_circuit_foundry(state, pid, structure.sector_id):
+                        production = int(production * 1.2)
+                    player.biomass += production
+                    player.total_resources_produced += production
+
+    # 7b. Trade deal execution & espionage cleanup
+    for pid in sorted(state.players):
+        player = state.players[pid]
+
+        # Execute active trade deals
+        remaining_deals = []
+        for deal in player.active_trade_deals:
+            if deal["expires_at"] > state.heartbeat:
+                target = state.players.get(deal["target_player_id"])
+                if target is not None:
+                    rt = deal["resource_type"]
+                    amt = deal["amount"]
+                    has_enough = False
+                    if rt == "METAL" and player.metal >= amt:
+                        player.metal -= amt
+                        target.metal += amt
+                        has_enough = True
+                    elif rt == "DATA" and player.data >= amt:
+                        player.data -= amt
+                        target.data += amt
+                        has_enough = True
+                    elif rt == "BIOMASS" and player.biomass >= amt:
+                        player.biomass -= amt
+                        target.biomass += amt
+                        has_enough = True
+                    if has_enough:
+                        player.trade_volume_total += amt
+                remaining_deals.append(deal)
+        player.active_trade_deals = remaining_deals
+
+        # Clean up expired espionage reveals
+        player.espionage_reveals = {
+            tid: expires_at
+            for tid, expires_at in player.espionage_reveals.items()
+            if expires_at > state.heartbeat
+        }
 
     # 8. Sort actions deterministically
     pending.sort(key=lambda a: (-a.priority, a.submitted_heartbeat, a.issuer_player_id, a.action_id))

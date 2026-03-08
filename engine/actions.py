@@ -12,7 +12,7 @@ from .config import (
     SUBAGENT_DATA_COST,
     SUBAGENT_UPKEEP,
 )
-from .conflict import _has_active_shield_in_sector, _handle_core_destroyed
+from .conflict import _has_active_mech_bay_in_sector, _has_active_shield_in_sector, _handle_core_destroyed
 from .control import recompute_sector_control
 from .energy import compute_player_available_energy
 from .enums import ActionStatus, ActionType, DiplomaticStance, ResourceType, SectorType, StructureType
@@ -117,6 +117,10 @@ def validate_action(state: GameState, action: Action) -> ValidationResult:
         return _validate_set_policy(state, action, player)
     elif at == ActionType.TRANSFER_RESOURCE:
         return _validate_transfer(state, action, player)
+    elif at == ActionType.ESPIONAGE:
+        return _validate_espionage(state, action, player)
+    elif at == ActionType.TRADE_DEAL:
+        return _validate_trade_deal(state, action, player)
 
     return ValidationResult(accepted=False, action_id=aid, reason="Unknown action type")
 
@@ -419,6 +423,10 @@ def resolve_action(state: GameState, action: Action) -> None:
         _resolve_set_policy(state, action, player, cost)
     elif at == ActionType.TRANSFER_RESOURCE:
         _resolve_transfer(state, action, player, cost)
+    elif at == ActionType.ESPIONAGE:
+        _resolve_espionage(state, action, player, cost)
+    elif at == ActionType.TRADE_DEAL:
+        _resolve_trade_deal(state, action, player, cost)
 
     action.status = ActionStatus.RESOLVED
 
@@ -435,6 +443,7 @@ def _resolve_build(state, action, player, cost):
     player.metal -= catalog["metal_cost"]
     player.data -= catalog["data_cost"]
     player.biomass -= catalog["biomass_cost"]
+    player.resources_spent_on_structures += catalog["metal_cost"] + catalog["data_cost"] + catalog["biomass_cost"]
 
     st_id = next_id(state, "st")
     structure = StructureState(
@@ -495,6 +504,12 @@ def _resolve_attack(state, action, player, cost):
         state, target.owner_player_id, target.sector_id
     ):
         damage = damage // 2
+
+    # Mech Bay: 30% damage reduction if owner has active MECH_BAY in same sector
+    if target.owner_player_id is not None and _has_active_mech_bay_in_sector(
+        state, target.owner_player_id, target.sector_id
+    ):
+        damage = int(damage * 0.7)
 
     target.hp -= damage
 
@@ -567,3 +582,79 @@ def _resolve_transfer(state, action, player, cost):
     elif rt_str == "BIOMASS":
         player.biomass -= amount
         target.biomass += amount
+
+
+def _validate_espionage(state, action, player):
+    aid = action.action_id
+    target_pid = action.payload.get("target_player_id")
+    if target_pid is None:
+        return ValidationResult(accepted=False, action_id=aid, reason="Missing target_player_id")
+    if target_pid == player.player_id:
+        return ValidationResult(accepted=False, action_id=aid, reason="Cannot spy on self")
+    target = state.players.get(target_pid)
+    if target is None:
+        return ValidationResult(accepted=False, action_id=aid, reason="Target player not found")
+    if player.data < 2:
+        return ValidationResult(accepted=False, action_id=aid, reason="Not enough data")
+    return ValidationResult(accepted=True, action_id=aid)
+
+
+def _resolve_espionage(state, action, player, cost):
+    player.energy_spent_this_heartbeat += cost
+    player.data -= 2
+    target_pid = action.payload["target_player_id"]
+    player.espionage_reveals[target_pid] = state.heartbeat + 5
+
+
+def _validate_trade_deal(state, action, player):
+    aid = action.action_id
+    payload = action.payload
+    target_pid = payload.get("target_player_id")
+    resource_type = payload.get("resource_type")
+    amount = payload.get("amount")
+    duration = payload.get("duration")
+
+    if target_pid is None or resource_type is None or amount is None or duration is None:
+        return ValidationResult(
+            accepted=False, action_id=aid,
+            reason="Missing target_player_id, resource_type, amount, or duration",
+        )
+
+    target = state.players.get(target_pid)
+    if target is None:
+        return ValidationResult(accepted=False, action_id=aid, reason="Target player not found")
+
+    # Mutual ally check
+    player_stance = player.diplomacy_stance.get(target_pid, DiplomaticStance.NEUTRAL)
+    target_stance = target.diplomacy_stance.get(player.player_id, DiplomaticStance.NEUTRAL)
+    if player_stance != DiplomaticStance.ALLY or target_stance != DiplomaticStance.ALLY:
+        return ValidationResult(accepted=False, action_id=aid, reason="Both players must be mutual allies")
+
+    rt_str = resource_type if isinstance(resource_type, str) else resource_type.value
+    if rt_str not in ("METAL", "DATA", "BIOMASS"):
+        return ValidationResult(accepted=False, action_id=aid, reason=f"Invalid resource_type '{resource_type}'")
+
+    if not isinstance(amount, int) or amount < 1 or amount > 5:
+        return ValidationResult(accepted=False, action_id=aid, reason="Amount must be between 1 and 5")
+
+    if not isinstance(duration, int) or duration < 1 or duration > 50:
+        return ValidationResult(accepted=False, action_id=aid, reason="Duration must be between 1 and 50")
+
+    return ValidationResult(accepted=True, action_id=aid)
+
+
+def _resolve_trade_deal(state, action, player, cost):
+    player.energy_spent_this_heartbeat += cost
+    payload = action.payload
+    target_pid = payload["target_player_id"]
+    rt = payload["resource_type"]
+    rt_str = rt if isinstance(rt, str) else rt.value
+    amount = payload["amount"]
+    duration = payload["duration"]
+
+    player.active_trade_deals.append({
+        "target_player_id": target_pid,
+        "resource_type": rt_str,
+        "amount": amount,
+        "expires_at": state.heartbeat + duration,
+    })
