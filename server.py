@@ -894,6 +894,25 @@ def create_game(req: CreateGameRequest) -> CreateGameResponse:
     )
 
 
+# -- List active games -----------------------------------------------------
+
+@app.get("/games/list")
+def list_games() -> list[dict]:
+    """List all active games (benchmarks + private matches)."""
+    result = []
+    for gid, state in games.items():
+        player_names = [p.name for p in state.players.values()]
+        result.append({
+            "game_id": gid,
+            "heartbeat": state.heartbeat,
+            "players": len(state.players),
+            "player_names": player_names,
+            "session_name": state.session_name or gid,
+            "session_id": state.session_id or "",
+        })
+    return result
+
+
 # -- Full game state -------------------------------------------------------
 
 @app.get("/games/{game_id}")

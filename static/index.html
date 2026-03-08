@@ -392,7 +392,9 @@ body {
   <div class="hb-counter" id="hbCounter">HB: --</div>
   <div class="status-badge" id="statusBadge">Connecting...</div>
   <img src="static/heartclaws-logo-alpha.png" alt="HeartClaws" class="header-logo-left">
-  <a class="match-link" href="match.html">Private Match</a>
+  <select id="gameSelect" style="background:var(--card);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:4px 8px;border-radius:3px;outline:none;min-width:180px;margin-left:auto;">
+    <option value="world">World (Open World)</option>
+  </select>
 </div>
 
 <div class="main">
@@ -819,7 +821,82 @@ function esc(s) {
   return d.innerHTML;
 }
 
+/* Game selector */
+var $gameSelect = document.getElementById('gameSelect');
+var currentGameId = 'world'; // 'world' = open world, anything else = /games/{id}
+
+function loadGameList() {
+  fetch(apiUrl('/games/list'))
+    .then(function(r) { return r.json(); })
+    .then(function(list) {
+      // Keep current selection
+      var val = $gameSelect.value;
+      // Clear non-world options
+      while ($gameSelect.options.length > 1) $gameSelect.remove(1);
+      list.forEach(function(g) {
+        var opt = document.createElement('option');
+        opt.value = g.game_id;
+        opt.textContent = g.session_name + ' (HB ' + g.heartbeat + ', ' + g.players + 'p)';
+        $gameSelect.appendChild(opt);
+      });
+      $gameSelect.value = val;
+    }).catch(function() {});
+}
+
+$gameSelect.addEventListener('change', function() {
+  currentGameId = $gameSelect.value;
+  selectedPlayer = null;
+  playerViewData = null;
+  $search.value = '';
+  worldState = null;
+  leaderboardData = [];
+  historyEvents = [];
+  $grid.innerHTML = '';
+  $lbBody.innerHTML = '';
+  $detail.innerHTML = '';
+  $eventLog.innerHTML = '';
+  fetchAll();
+});
+
+// Override fetchAll to support game switching
+var _origFetchAll = fetchAll;
+fetchAll = function() {
+  if (currentGameId === 'world') {
+    _origFetchAll();
+  } else {
+    fetchGameView(currentGameId);
+  }
+  loadGameList();
+};
+
+function fetchGameView(gameId) {
+  Promise.all([
+    fetch(apiUrl('/games/' + gameId)).then(function(r) { return r.json(); }),
+    fetch(apiUrl('/games/' + gameId + '/leaderboard')).then(function(r) { return r.json(); }),
+  ]).then(function(results) {
+    worldState = results[0];
+    leaderboardData = results[1];
+    historyEvents = (worldState.event_log || []).slice(-100).reverse();
+
+    $hb.textContent = 'HB: ' + worldState.heartbeat;
+    $status.textContent = 'Game: ' + gameId;
+    $status.style.background = '#1a2a3a';
+    $status.style.color = '#00ccff';
+
+    renderGrid();
+    renderLeaderboard();
+    renderDetail();
+    renderEvents();
+  }).catch(function(err) {
+    console.error('Game fetch error:', err);
+    $status.textContent = 'Error';
+    $status.style.background = '#3a1a1a';
+    $status.style.color = '#ff4444';
+  });
+}
+
 /* Init + auto-refresh */
+loadGameList();
 fetchAll();
 setInterval(fetchAll, 10000);
 </script>

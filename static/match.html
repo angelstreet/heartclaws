@@ -250,6 +250,11 @@ body {
 </div>
 
 <div class="controls">
+  <label>Watch Game:</label>
+  <select id="gameSelect"><option value="">— Select a game —</option></select>
+  <button class="ctrl-btn" id="btnRefreshGames">Refresh</button>
+  <span style="color:var(--border);margin:0 8px">|</span>
+  <label>New Match:</label>
   <label>P1:</label>
   <select id="p1Strat">
     <option value="expansionist">Expansionist</option>
@@ -341,10 +346,138 @@ var $p1Strat = document.getElementById('p1Strat');
 var $p2Strat = document.getElementById('p2Strat');
 var $seedInput = document.getElementById('seedInput');
 var $speedInput = document.getElementById('speedInput');
+var $gameSelect = document.getElementById('gameSelect');
+var $btnRefreshGames = document.getElementById('btnRefreshGames');
 
 var ws = null;
 var paused = false;
 var allEvents = [];
+var watchInterval = null;
+var lastWatchHB = -1;
+
+/* Load active games into dropdown */
+function loadGameList() {
+  fetch(API_BASE + '/games/list')
+    .then(function(r) { return r.json(); })
+    .then(function(list) {
+      var val = $gameSelect.value;
+      $gameSelect.innerHTML = '<option value="">— Select a game —</option>';
+      list.forEach(function(g) {
+        var opt = document.createElement('option');
+        opt.value = g.game_id;
+        opt.textContent = g.session_name + ' (HB ' + g.heartbeat + ', ' + g.players + ' players)';
+        $gameSelect.appendChild(opt);
+      });
+      if (val) $gameSelect.value = val;
+    })
+    .catch(function() {});
+}
+
+loadGameList();
+$btnRefreshGames.addEventListener('click', loadGameList);
+
+/* Watch a live game by polling */
+$gameSelect.addEventListener('change', function() {
+  if (watchInterval) { clearInterval(watchInterval); watchInterval = null; }
+  if (ws) { ws.close(); ws = null; }
+  var gameId = $gameSelect.value;
+  if (!gameId) {
+    $matchStatus.textContent = 'Ready';
+    $matchStatus.style.color = '#ffaa00';
+    return;
+  }
+  lastWatchHB = -1;
+  allEvents = [];
+  $eventLog.innerHTML = '';
+  $matchStatus.textContent = 'Watching ' + gameId;
+  $matchStatus.style.color = '#00ccff';
+  $btnStart.textContent = 'Start';
+  $btnPause.disabled = true;
+  $btnStep.disabled = true;
+  pollGame(gameId);
+  watchInterval = setInterval(function() { pollGame(gameId); }, 3000);
+});
+
+function pollGame(gameId) {
+  Promise.all([
+    fetch(API_BASE + '/games/' + gameId + '/map').then(function(r) { return r.json(); }),
+    fetch(API_BASE + '/games/' + gameId + '/leaderboard').then(function(r) { return r.json(); }),
+    fetch(API_BASE + '/games/' + gameId + '/stats').then(function(r) { return r.json(); }),
+    fetch(API_BASE + '/games/' + gameId).then(function(r) { return r.json(); }),
+  ]).then(function(results) {
+    var mapData = results[0];
+    var lb = results[1];
+    var stats = results[2];
+    var fullState = results[3];
+    var hb = fullState.heartbeat || 0;
+
+    $hbDisplay.textContent = 'HB: ' + hb;
+
+    /* Render map */
+    var sectors = mapData.sectors || {};
+    var sectorList = Object.values(sectors);
+    var html = '';
+    sectorList.forEach(function(s) {
+      var bg = BIOME_COLORS[s.sector_type] || '#44444480';
+      var ctrl = s.controller_player_id;
+      var ctrlClass = '';
+      if (ctrl) {
+        var pColors = ['ctrl-p1','ctrl-p2','ctrl-p3','ctrl-p4','ctrl-p5','ctrl-p6'];
+        var pIdx = parseInt(ctrl.replace('p','')) - 1;
+        ctrlClass = ' ' + (pColors[pIdx] || 'ctrl-p1');
+      }
+      var structs = (s.structures || []).length;
+      html += '<div class="hex-cell' + ctrlClass + '" style="background:' + bg + '">'
+        + '<span class="cell-id">' + s.sector_id + '</span>';
+      if (structs > 0) html += '<span class="cell-info">' + structs + '</span>';
+      html += '</div>';
+    });
+    $grid.innerHTML = html;
+
+    /* Render players from leaderboard */
+    var players = fullState.players || {};
+    var pids = Object.keys(players);
+    var p1 = players[pids[0]];
+    var p2 = players[pids[1]];
+    if (p1) { $p1Name.textContent = p1.name || pids[0]; renderWatchPlayerStats($p1Stats, p1); }
+    if (p2) { $p2Name.textContent = p2.name || pids[1]; renderWatchPlayerStats($p2Stats, p2); }
+
+    /* Match stats */
+    if (stats) {
+      $matchStats.innerHTML = statRow('Heartbeat', stats.heartbeat)
+        + statRow('Alive Players', stats.alive_players)
+        + statRow('Total Structures', stats.total_structures)
+        + statRow('Total Sectors', stats.total_sectors);
+    }
+
+    /* Leaderboard in event log */
+    if (lb && lb.length > 0 && hb !== lastWatchHB) {
+      lastWatchHB = hb;
+      var evHtml = '<div class="event-row"><span class="ev-hb">HB' + hb + '</span><span class="ev-type">LEADERBOARD</span></div>';
+      lb.forEach(function(entry, i) {
+        evHtml += '<div class="event-row">#' + (i+1) + ' ' + (entry.player_id) + ' — score=' + (entry.composite||0).toFixed(1)
+          + ' T=' + (entry.territory||0) + ' E=' + (entry.economy||0).toFixed(1) + '</div>';
+      });
+      allEvents.unshift({_html: evHtml});
+      var logHtml = '';
+      allEvents.slice(0, 100).forEach(function(ev) { logHtml += ev._html; });
+      $eventLog.innerHTML = logHtml;
+    }
+
+    $matchStatus.textContent = 'Watching — HB ' + hb;
+  }).catch(function(err) {
+    $matchStatus.textContent = 'Poll error: ' + err.message;
+    $matchStatus.style.color = '#ff4444';
+  });
+}
+
+function renderWatchPlayerStats(el, p) {
+  if (!p) { el.innerHTML = ''; return; }
+  el.innerHTML = statRow('Energy', p.energy_reserve)
+    + statRow('Metal', p.metal)
+    + statRow('Data', p.data)
+    + statRow('Biomass', p.biomass);
+}
 
 /* WebSocket URL */
 function wsUrl() {

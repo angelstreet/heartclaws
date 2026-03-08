@@ -28,6 +28,10 @@ import httpx
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("benchmark")
 
+# Silence noisy httpx request logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -105,25 +109,37 @@ MODELS: dict[str, ModelConfig] = {
         api_key_env="OPENROUTER_API_KEY",
     ),
     # --- Free OpenRouter models ---
-    "qwen3-coder": ModelConfig(
-        name="Qwen3 Coder 480B",
-        model_id="qwen/qwen3-coder-480b-a35b:free",
+    "step-flash": ModelConfig(
+        name="Step 3.5 Flash",
+        model_id="stepfun/step-3.5-flash:free",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
-    "deepseek-r1": ModelConfig(
-        name="DeepSeek R1",
-        model_id="deepseek/deepseek-r1:free",
+    "nemotron": ModelConfig(
+        name="Nemotron Nano 30B",
+        model_id="nvidia/nemotron-3-nano-30b-a3b:free",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
-    "glm-4": ModelConfig(
-        name="GLM-4.5 Air",
-        model_id="thudm/glm-4.5-air:free",
+    "trinity": ModelConfig(
+        name="Trinity Large",
+        model_id="arcee-ai/trinity-large-preview:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "qwen-vl": ModelConfig(
+        name="Qwen3 VL 30B",
+        model_id="qwen/qwen3-vl-30b-a3b-thinking",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
     # --- Direct APIs ---
+    "codestral": ModelConfig(
+        name="Codestral",
+        model_id="codestral-latest",
+        provider="mistral",
+        api_key_env="CODESTRAL_API_KEY",
+    ),
     "minimax": ModelConfig(
         name="MiniMax M1",
         model_id="MiniMax-M1-80k",
@@ -294,18 +310,47 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
                 return []
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
 
+        elif model.provider == "mistral":
+            base_url = "https://codestral.mistral.ai" if "codestral" in model.model_id else "https://api.mistral.ai"
+            resp = await client.post(
+                f"{base_url}/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model.model_id,
+                    "max_tokens": 1024,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                },
+                timeout=30,
+            )
+            data = resp.json()
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+
         else:
             log.warning("Unknown provider: %s", model.provider)
             return []
 
-        # Parse JSON from response (handle markdown code blocks)
+        # Parse JSON from response (handle markdown code blocks, thinking tags)
+        if not text:
+            log.warning("%s returned empty content", model.name)
+            return []
         text = text.strip()
+        # Strip <think>...</think> tags from thinking models
+        import re
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        if not text:
+            return []
         return json.loads(text)
 
     except json.JSONDecodeError as e:
-        log.warning("%s returned invalid JSON: %s", model.name, e)
+        log.warning("%s returned invalid JSON: %s — raw: %s", model.name, e, (text or "")[:100])
         return []
     except Exception as e:
         log.warning("%s LLM call failed: %s", model.name, e)
@@ -395,10 +440,13 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     actions = await call_llm(client, agent.model, state_json)
 
     if not actions:
+        log.debug("%s (%s): no actions returned", agent.model.name, agent.player_id)
         return
 
     # Submit each action
-    for action in actions[:3]:  # Max 3 per heartbeat
+    accepted = []
+    rejected = []
+    for action in actions[:5]:  # Max 5 per heartbeat
         action_type = action.get("action_type", "")
         payload = action.get("payload", {})
         result = await hc_post(client, f"/games/{game_id}/actions", {
@@ -408,8 +456,16 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         })
         if result and result.get("accepted"):
             agent.actions_submitted += 1
+            accepted.append(action_type)
         else:
             agent.actions_failed += 1
+            reason = result.get("reason", "?") if result else "no response"
+            rejected.append(f"{action_type}({reason})")
+
+    summary = ", ".join(accepted) if accepted else "none"
+    if rejected:
+        summary += " | REJECTED: " + ", ".join(rejected)
+    log.info("%s (%s): %s", agent.model.name, agent.player_id, summary)
 
 
 # ---------------------------------------------------------------------------
