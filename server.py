@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import asdict, fields, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -34,6 +36,16 @@ from engine.engine import (
 )
 from engine.enums import ActionType, SectorType, StructureType
 from engine.models import Action, GameState
+from engine.openworld import (
+    apply_open_world_decay,
+    init_open_world,
+    join_open_world,
+    leave_open_world,
+    send_message,
+    get_messages,
+)
+from engine.seasons import check_season_boundary, compute_leaderboard, get_current_season
+from engine.world import get_open_world_stats
 
 # Import autoplay helpers for WebSocket match runner
 from autoplay import (
@@ -48,11 +60,100 @@ from autoplay import (
     P2,
 )
 
+logger = logging.getLogger("heartclaws")
+
+# ---------------------------------------------------------------------------
+# Open world state
+# ---------------------------------------------------------------------------
+
+open_world_state: GameState | None = None
+open_world_save_path: str = "saves/openworld.json"
+
+# Connected WebSocket clients for live world updates
+world_ws_clients: set[WebSocket] = set()
+
+HEARTBEAT_INTERVAL_SECONDS = 300  # 5 minutes
+
+
+# ---------------------------------------------------------------------------
+# Background heartbeat loop
+# ---------------------------------------------------------------------------
+
+
+async def open_world_heartbeat_loop():
+    """Background loop that runs heartbeats for the open world."""
+    global open_world_state
+    while True:
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        if open_world_state is None:
+            continue
+
+        # 1. Apply decay
+        apply_open_world_decay(open_world_state)
+
+        # 2. Run heartbeat (same engine as matches)
+        hb_result = run_heartbeat(open_world_state)
+
+        # 3. Check season boundary
+        season_result = check_season_boundary(open_world_state)
+
+        # 4. Auto-save
+        _ensure_saves_dir()
+        save_game(open_world_state, open_world_save_path)
+
+        # 5. Broadcast to WebSocket clients
+        payload = {
+            "type": "heartbeat",
+            "heartbeat": open_world_state.heartbeat,
+            "events": _serialize(hb_result.events),
+            "season": season_result,
+        }
+        dead: set[WebSocket] = set()
+        for ws in world_ws_clients:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.add(ws)
+        world_ws_clients -= dead
+
+
+def _ensure_saves_dir():
+    """Create saves/ directory if it doesn't exist."""
+    Path("saves").mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global open_world_state
+    # Try to load existing world save on startup
+    save_path = Path(open_world_save_path)
+    if save_path.exists():
+        try:
+            open_world_state = load_game(open_world_save_path)
+            logger.info("Loaded open world from %s (heartbeat %d)", open_world_save_path, open_world_state.heartbeat)
+        except Exception as e:
+            logger.warning("Failed to load open world save: %s", e)
+
+    # Start background heartbeat
+    task = asyncio.create_task(open_world_heartbeat_loop())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="HeartClaws", version="0.1.0")
+app = FastAPI(title="HeartClaws", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -494,6 +595,15 @@ class LoadGameRequest(BaseModel):
     path: str
 
 
+class WorldJoinRequest(BaseModel):
+    name: str
+    gateway_id: str | None = None
+
+
+class WorldLeaveRequest(BaseModel):
+    player_id: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -654,6 +764,213 @@ def post_load(req: LoadGameRequest) -> dict:
         raise HTTPException(status_code=404, detail=f"Save file not found: {req.path}")
     games[state.game_id] = state
     return {"loaded": True, "game_id": state.game_id, "heartbeat": state.heartbeat}
+
+
+# ---------------------------------------------------------------------------
+# Open World endpoints
+# ---------------------------------------------------------------------------
+
+
+def _get_world() -> GameState:
+    """Return the open world state or raise 404."""
+    if open_world_state is None:
+        raise HTTPException(status_code=404, detail="Open world not created. POST /world/create first.")
+    return open_world_state
+
+
+@app.post("/world/create")
+def create_world(seed: int = 42) -> dict:
+    """Create persistent open world. Returns world stats."""
+    global open_world_state
+    open_world_state = init_open_world(seed)
+    _ensure_saves_dir()
+    save_game(open_world_state, open_world_save_path)
+    stats = get_open_world_stats(open_world_state.world)
+    return {
+        "game_id": open_world_state.game_id,
+        "seed": seed,
+        "heartbeat": open_world_state.heartbeat,
+        **stats,
+    }
+
+
+@app.post("/world/join")
+def world_join(request: WorldJoinRequest) -> dict:
+    """Join the open world. Returns credentials + spawn info."""
+    state = _get_world()
+    result = join_open_world(state, request.name, request.gateway_id)
+    _ensure_saves_dir()
+    save_game(state, open_world_save_path)
+    return result
+
+
+@app.post("/world/leave")
+def world_leave(request: WorldLeaveRequest) -> dict:
+    """Graceful leave. Structures become ruins."""
+    state = _get_world()
+    player = state.players.get(request.player_id)
+    if player is None:
+        raise HTTPException(status_code=400, detail=f"Player '{request.player_id}' not found")
+    result = leave_open_world(state, request.player_id)
+    _ensure_saves_dir()
+    save_game(state, open_world_save_path)
+    return result
+
+
+@app.get("/world/state")
+def world_state() -> dict:
+    """Full world state as JSON."""
+    state = _get_world()
+    return _serialize(state)
+
+
+@app.get("/world/state/{player_id}")
+def world_player_state(player_id: str) -> dict:
+    """Player-specific view."""
+    state = _get_world()
+    view = get_player_view(state, player_id)
+    if "error" in view:
+        raise HTTPException(status_code=404, detail=view["error"])
+    return view
+
+
+@app.post("/world/action")
+def world_action(request: dict) -> dict:
+    """Submit actions to the open world."""
+    state = _get_world()
+
+    player_id = request.get("player_id")
+    action_type_raw = request.get("action_type")
+    payload = request.get("payload", {})
+    priority = request.get("priority", 0)
+
+    if not player_id:
+        raise HTTPException(status_code=400, detail="Missing player_id")
+    if not action_type_raw:
+        raise HTTPException(status_code=400, detail="Missing action_type")
+
+    player = state.players.get(player_id)
+    if player is None:
+        raise HTTPException(status_code=400, detail=f"Player '{player_id}' not found")
+
+    try:
+        action_type = ActionType(action_type_raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid action_type '{action_type_raw}'")
+
+    action_id = f"act_{uuid.uuid4().hex[:8]}"
+    energy_cost = _compute_energy_cost(action_type, payload)
+
+    action = Action(
+        action_id=action_id,
+        issuer_player_id=player_id,
+        issuer_subagent_id=None,
+        action_type=action_type,
+        payload=payload,
+        energy_cost=energy_cost,
+        submitted_heartbeat=state.heartbeat,
+        priority=priority,
+    )
+
+    result = submit_action(state, action)
+
+    # Update player's last_active_heartbeat
+    player.last_active_heartbeat = state.heartbeat
+
+    # Auto-save
+    _ensure_saves_dir()
+    save_game(state, open_world_save_path)
+
+    return {
+        "accepted": result.accepted,
+        "action_id": result.action_id,
+        "reason": result.reason,
+        "energy_cost": energy_cost,
+    }
+
+
+@app.get("/world/leaderboard")
+def world_leaderboard() -> list:
+    """Current leaderboard."""
+    state = _get_world()
+    return compute_leaderboard(state)
+
+
+@app.get("/world/season")
+def world_season() -> dict:
+    """Season info + time remaining."""
+    state = _get_world()
+    return get_current_season(state)
+
+
+@app.post("/world/message")
+def world_message(request: dict) -> dict:
+    """Send diplomatic message."""
+    state = _get_world()
+
+    from_player_id = request.get("from_player_id")
+    to_player_id = request.get("to_player_id")
+    message = request.get("message")
+
+    if not from_player_id or not to_player_id or not message:
+        raise HTTPException(status_code=400, detail="Missing from_player_id, to_player_id, or message")
+
+    if from_player_id not in state.players:
+        raise HTTPException(status_code=400, detail=f"Player '{from_player_id}' not found")
+    if to_player_id not in state.players:
+        raise HTTPException(status_code=400, detail=f"Player '{to_player_id}' not found")
+
+    result = send_message(state, from_player_id, to_player_id, message)
+
+    # Auto-save
+    _ensure_saves_dir()
+    save_game(state, open_world_save_path)
+
+    return result
+
+
+@app.get("/world/messages/{player_id}")
+def world_messages(player_id: str) -> list:
+    """Read messages for a player."""
+    state = _get_world()
+    if player_id not in state.players:
+        raise HTTPException(status_code=400, detail=f"Player '{player_id}' not found")
+    return get_messages(state, player_id)
+
+
+@app.get("/world/history")
+def world_history(limit: int = 50, offset: int = 0) -> dict:
+    """Event log (paginated)."""
+    state = _get_world()
+    events = state.event_log
+    total = len(events)
+    page = events[offset : offset + limit]
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "events": _serialize(page),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Open World WebSocket
+# ---------------------------------------------------------------------------
+
+
+@app.websocket("/ws/world")
+async def ws_world(websocket: WebSocket):
+    """Live heartbeat stream for viewers."""
+    await websocket.accept()
+    world_ws_clients.add(websocket)
+    try:
+        while True:
+            # Keep connection alive; ignore client messages
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        world_ws_clients.discard(websocket)
 
 
 # ---------------------------------------------------------------------------
