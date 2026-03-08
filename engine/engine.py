@@ -86,6 +86,16 @@ def get_player_view(state: GameState, player_id: str) -> dict:
         if sector.controller_player_id == player_id
     ]
 
+    # Include resource node info for controlled sectors so agents know where to build
+    sector_details = {}
+    for sid in controlled_sectors:
+        sector = state.world.sectors[sid]
+        nodes = [
+            {"type": n.resource_type.value, "richness": n.richness, "depleted": n.depleted}
+            for n in sector.resource_nodes
+        ]
+        sector_details[sid] = {"resource_nodes": nodes}
+
     visible_structures = {
         st_id: {
             "structure_id": st.structure_id,
@@ -141,6 +151,7 @@ def get_player_view(state: GameState, player_id: str) -> dict:
             "biomass": player.biomass,
         },
         "controlled_sectors": controlled_sectors,
+        "sector_details": sector_details,
         "structures": visible_structures,
         "energy": {
             "reserve": player.energy_reserve,

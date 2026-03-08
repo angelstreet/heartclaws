@@ -393,7 +393,7 @@ body {
   <div class="status-badge" id="statusBadge">Connecting...</div>
   <img src="static/heartclaws-logo-alpha.png" alt="HeartClaws" class="header-logo-left">
   <select id="gameSelect" style="background:var(--card);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:4px 8px;border-radius:3px;outline:none;min-width:180px;margin-left:auto;">
-    <option value="world">World (Open World)</option>
+    <option value="world">OpenWorld</option>
   </select>
 </div>
 
@@ -789,8 +789,8 @@ function formatEvent(ev) {
   if (type === 'STRUCTURE_BUILT') return esc(actorName) + ' built <b>' + (d.structure_type || '?') + '</b> in ' + (d.sector_id || '?') + costTag;
   if (type === 'STRUCTURE_DESTROYED') return '<b>' + (ev.target_id || '?') + '</b> destroyed in ' + (d.sector_id || '?');
   if (type === 'SECTOR_CONTROL_CHANGED') {
-    var oldN = d.old_controller && worldState.players[d.old_controller] ? worldState.players[d.old_controller].name : (d.old_controller || 'none');
-    var newN = d.new_controller && worldState.players[d.new_controller] ? worldState.players[d.new_controller].name : (d.new_controller || 'none');
+    var oldN = d.old_controller && worldState.players[d.old_controller] ? worldState.players[d.old_controller].name : (d.old_controller || 'unclaimed');
+    var newN = d.new_controller && worldState.players[d.new_controller] ? worldState.players[d.new_controller].name : (d.new_controller || 'unclaimed');
     return (ev.target_id || '?') + ': ' + esc(oldN) + ' &rarr; ' + esc(newN);
   }
   if (type === 'ACTION_RESOLVED') {
@@ -840,7 +840,7 @@ function loadGameList() {
         $gameSelect.appendChild(opt);
       });
       $gameSelect.value = val;
-    }).catch(function() {});
+    }).catch(function(err) { console.error('loadGameList failed:', err); });
 }
 
 $gameSelect.addEventListener('change', function() {

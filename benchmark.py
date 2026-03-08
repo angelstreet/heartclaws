@@ -170,7 +170,7 @@ MODELS: dict[str, ModelConfig] = {
 # LLM call abstraction
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a hex-grid strategy game. Respond with a JSON array of 1-5 actions. No explanation, just JSON.
+SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a hex-grid strategy game (8x8 grid, coordinates H_0_0 to H_7_7). Respond with a JSON array of 1-5 actions. No explanation, just JSON.
 
 Format: [{"action_type": "...", "payload": {...}}, ...]
 
@@ -183,7 +183,7 @@ ACTIONS & PAYLOADS:
 - ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"} — need ATTACK_NODE in target/adjacent sector, cannot attack allies or spawn-protected players (first 10 heartbeats)
 - SET_POLICY: {"target_player_id": "pN", "stance": "ALLY|NEUTRAL|HOSTILE"}
 - TRANSFER_RESOURCE: {"target_player_id": "pN", "resource_type": "METAL|DATA|BIOMASS", "amount": N}
-- SCAN_SECTOR: {"sector_id": "H_x_y"} — reveals sector info, must be controlled or adjacent to controlled
+- SCAN_SECTOR: {"sector_id": "H_x_y"} — reveals sector info, ONLY works on sectors you control or adjacent to ones you control
 - REMOVE_STRUCTURE: {"structure_id": "st_xxx"} — remove your own structure
 
 BUILD RULES:
@@ -193,12 +193,15 @@ BUILD RULES:
 - Building a TOWER in an uncontrolled sector claims it for you
 - Each structure costs resources (metal/data/biomass) — check you have enough
 
-STRATEGY:
-- Turn 1: SCAN adjacent sectors to find resource nodes, then BUILD extractors on matching resources
-- Expand with TOWERs to adjacent uncontrolled sectors
-- Build REACTOR when energy is low
-- Build ATTACK_NODE before attacking anyone
-- Ally with neighbors early (SET_POLICY stance=ALLY)
+STRATEGY PRIORITIES (follow this order every turn):
+1. BUILD first — always prioritize building over scanning. Build EXTRACTOR/DATA_HARVESTER/BIO_CULTIVATOR on sectors that have matching resource nodes. Build TOWERs on adjacent uncontrolled sectors to expand.
+2. SCAN sparingly — only scan 1 unknown adjacent sector per turn, and only if you have spare actions. Never submit more than 1 SCAN per turn.
+3. Build REACTOR if your energy income is low or negative.
+4. SET_POLICY stance=ALLY with nearby players early.
+5. Build ATTACK_NODE only when you have 3+ structures and want to attack.
+6. DO NOT repeat failed actions. If a SCAN or BUILD was rejected, try a different sector or action.
+
+IMPORTANT: Your home sector (where you spawned) likely has a resource node — build an extractor there on turn 1!
 
 Respond ONLY with a valid JSON array."""
 
@@ -383,7 +386,12 @@ async def hc_get(client: httpx.AsyncClient, path: str) -> dict | list | None:
 async def hc_post(client: httpx.AsyncClient, path: str, data: dict) -> dict | None:
     try:
         resp = await client.post(f"{HEARTCLAWS_API}{path}", json=data, timeout=10)
-        return resp.json()
+        result = resp.json()
+        # Convert HTTP error responses to a rejected result
+        if resp.status_code >= 400:
+            detail = result.get("detail", str(result))
+            return {"accepted": False, "reason": detail}
+        return result
     except Exception as e:
         log.error("POST %s failed: %s", path, e)
         return None
@@ -404,6 +412,7 @@ class BenchmarkAgent:
     actions_failed: int = 0
     errors: int = 0
     last_rejections: list[str] = field(default_factory=list)
+    all_errors: list[str] = field(default_factory=list)
 
 
 async def join_agent(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: str) -> bool:
@@ -435,14 +444,15 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     state = await hc_get(client, f"/games/{game_id}/player/{agent.player_id}")
     if not state:
         agent.errors += 1
+        agent.all_errors.append("GET player state failed")
         return
 
     # Trim state to reduce tokens — send only what matters
     compact_state = {
         "player": state.get("player"),
         "controlled_sectors": state.get("controlled_sectors"),
+        "sector_details": state.get("sector_details", {}),
         "structures": state.get("structures"),
-        "visible_sectors": state.get("visible_sectors", {}),
         "leaderboard_rank": state.get("leaderboard_rank"),
     }
     state_json = json.dumps(compact_state, default=str)
@@ -480,6 +490,7 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
             reason = result.get("reason", "?") if result else "no response"
             rejected.append(f"{action_type}({reason})")
             agent.last_rejections.append(f"{action_type}: {reason}")
+            agent.all_errors.append(f"{action_type}: {reason}")
 
     summary = ", ".join(accepted) if accepted else "none"
     if rejected:
@@ -509,13 +520,13 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
 
         # Create isolated benchmark game (does NOT touch the persistent world)
         import random
-        seed = random.randint(1, 99999)
-        run_id = f"benchmark-{int(time.time()) % 100000}"
+        run_id = int(time.time()) % 100000
+        seed = run_id  # Same number for game_id (bm_{seed}) and session name
         if not session_name:
-            session_name = f"Benchmark {run_id.split('-')[1]}"
+            session_name = f"Benchmark {run_id}"
         result = await hc_post(
             client,
-            f"/games/benchmark?seed={seed}&session_id={run_id}&session_name={session_name}",
+            f"/games/benchmark?seed={seed}&session_id=benchmark-{run_id}&session_name={session_name}",
             {},
         )
         if not result or "game_id" not in result:
@@ -572,9 +583,9 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
             # Progress log every 10 turns
             if turn % 10 == 0 or turn == 1:
                 lb = await hc_get(client, f"/games/{game_id}/leaderboard")
-                if lb:
+                if lb and isinstance(lb, list):
                     top = ", ".join(
-                        f"{e['player_id']}={e['composite']:.1f}"
+                        f"{e['player_id']}={e.get('composite', 0):.1f}"
                         for e in lb[:5]
                     )
                 else:
@@ -592,20 +603,24 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
         lb = await hc_get(client, f"/games/{game_id}/leaderboard")
         stats = await hc_get(client, f"/games/{game_id}/stats")
 
-        if lb:
+        if lb and isinstance(lb, list):
             log.info("\nFinal Leaderboard:")
+            log.info("  %-4s %-20s %-5s  %5s %5s %5s %5s %5s %5s %5s %5s",
+                     "Rank", "Model", "ID", "Score", "Terr", "Econ", "Mil", "Infl", "Effic", "Trade", "Expan")
+            log.info("  " + "-" * 90)
             for i, entry in enumerate(lb):
-                pid = entry["player_id"]
+                pid = entry.get("player_id", "?")
                 model_name = "?"
                 for a in agents:
                     if a.player_id == pid:
                         model_name = a.model.name
                         break
                 log.info(
-                    "  #%d %s (%s) — score=%.1f territory=%d economy=%.1f military=%d influence=%d",
+                    "  #%-3d %-20s %-5s  %5.1f %5d %5.1f %5d %5d %5.1f %5d %5.1f",
                     i + 1, model_name, pid,
-                    entry["composite"], entry["territory"],
-                    entry["economy"], entry["military"], entry["influence"],
+                    entry.get("composite", 0), entry.get("territory", 0),
+                    entry.get("economy", 0), entry.get("military", 0), entry.get("influence", 0),
+                    entry.get("efficiency", 0), entry.get("trade", 0), entry.get("expansion", 0),
                 )
 
         log.info("\nAgent Stats:")
@@ -621,6 +636,20 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
                 game_id, stats["heartbeat"], stats["alive_players"],
                 stats["total_structures"],
             )
+
+        # Error summary — deduplicated with counts
+        all_errors = []
+        for a in agents:
+            for e in a.all_errors:
+                all_errors.append(f"{a.model.name}: {e}")
+        if all_errors:
+            from collections import Counter
+            error_counts = Counter(all_errors)
+            log.info("\nErrors (%d total):", len(all_errors))
+            for err, count in error_counts.most_common():
+                log.info("  [%dx] %s", count, err)
+        else:
+            log.info("\nNo errors.")
 
 
 def _resolve_model(key: str) -> tuple[str, ModelConfig]:
