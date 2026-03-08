@@ -1,10 +1,11 @@
-"""Phase OW-2: Dynamic Join/Leave for Open World."""
+"""Phase OW-2/OW-4: Dynamic Join/Leave and Diplomacy for Open World."""
 
 from __future__ import annotations
 
 from .config import GameConfig, STRUCTURE_CATALOG
-from .enums import SectorType, StructureType
-from .models import GameState, PlayerState, StructureState, next_id
+from .enums import DiplomaticStance, SectorType, StructureType
+from .events import emit_event
+from .models import GameState, Message, PlayerState, StructureState, next_id
 from .world import create_open_world, _hex_distance, _sector_id, GRID_SIZE
 
 
@@ -275,3 +276,124 @@ def apply_open_world_decay(state: GameState) -> list:
         del state.structures[st_id]
 
     return decay_events
+
+
+# ---------------------------------------------------------------------------
+# Phase OW-4: Diplomacy
+# ---------------------------------------------------------------------------
+
+def set_diplomatic_stance(
+    state: GameState, player_id: str, target_player_id: str, stance: DiplomaticStance
+) -> dict:
+    """Set diplomatic stance toward another player.
+
+    Returns event dict with old_stance and new_stance.
+    If breaking ALLY stance, generates ALLIANCE_BROKEN event visible to all.
+    """
+    player = state.players[player_id]
+    old_stance = player.diplomacy_stance.get(target_player_id, DiplomaticStance.NEUTRAL)
+    player.diplomacy_stance[target_player_id] = stance
+
+    result = {
+        "player_id": player_id,
+        "target_player_id": target_player_id,
+        "old_stance": old_stance.value,
+        "new_stance": stance.value,
+    }
+
+    # If breaking an ALLY stance, emit ALLIANCE_BROKEN event
+    if old_stance == DiplomaticStance.ALLY and stance != DiplomaticStance.ALLY:
+        emit_event(
+            state,
+            "ALLIANCE_BROKEN",
+            actor_player_id=player_id,
+            target_id=target_player_id,
+            details={
+                "old_stance": old_stance.value,
+                "new_stance": stance.value,
+            },
+        )
+        result["alliance_broken"] = True
+
+    return result
+
+
+def get_diplomatic_relations(state: GameState, player_id: str) -> dict:
+    """Return all diplomatic stances for a player, plus who considers them ally/hostile."""
+    player = state.players[player_id]
+    stances = {k: v.value for k, v in player.diplomacy_stance.items()}
+
+    # Find who considers this player ally or hostile
+    allied_by: list[str] = []
+    hostile_by: list[str] = []
+    for pid, p in state.players.items():
+        if pid == player_id:
+            continue
+        stance = p.diplomacy_stance.get(player_id)
+        if stance == DiplomaticStance.ALLY:
+            allied_by.append(pid)
+        elif stance == DiplomaticStance.HOSTILE:
+            hostile_by.append(pid)
+
+    return {
+        "player_id": player_id,
+        "stances": stances,
+        "allied_by": allied_by,
+        "hostile_by": hostile_by,
+    }
+
+
+def are_mutual_allies(state: GameState, player_a: str, player_b: str) -> bool:
+    """Check if two players are mutual allies (both set ALLY toward each other)."""
+    pa = state.players.get(player_a)
+    pb = state.players.get(player_b)
+    if pa is None or pb is None:
+        return False
+    return (
+        pa.diplomacy_stance.get(player_b) == DiplomaticStance.ALLY
+        and pb.diplomacy_stance.get(player_a) == DiplomaticStance.ALLY
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase OW-4: Messaging
+# ---------------------------------------------------------------------------
+
+def send_message(
+    state: GameState, from_player_id: str, to_player_id: str, message: str
+) -> dict:
+    """Send a diplomatic message. Messages have no game effect -- pure information.
+
+    Store messages in a list on GameState.
+    Returns {"message_id": str, "from": str, "to": str, "heartbeat": int}
+    """
+    msg_id = next_id(state, "msg")
+    msg = Message(
+        message_id=msg_id,
+        from_player_id=from_player_id,
+        to_player_id=to_player_id,
+        content=message,
+        heartbeat=state.heartbeat,
+    )
+    state.messages.append(msg)
+    return {
+        "message_id": msg_id,
+        "from": from_player_id,
+        "to": to_player_id,
+        "heartbeat": state.heartbeat,
+    }
+
+
+def get_messages(state: GameState, player_id: str) -> list[dict]:
+    """Return all messages for a player (sent to them)."""
+    return [
+        {
+            "message_id": m.message_id,
+            "from": m.from_player_id,
+            "to": m.to_player_id,
+            "content": m.content,
+            "heartbeat": m.heartbeat,
+        }
+        for m in state.messages
+        if m.to_player_id == player_id
+    ]

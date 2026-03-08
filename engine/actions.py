@@ -12,9 +12,10 @@ from .config import (
     SUBAGENT_DATA_COST,
     SUBAGENT_UPKEEP,
 )
+from .conflict import _has_active_shield_in_sector, _handle_core_destroyed
 from .control import recompute_sector_control
 from .energy import compute_player_available_energy
-from .enums import ActionStatus, ActionType, ResourceType, SectorType, StructureType
+from .enums import ActionStatus, ActionType, DiplomaticStance, ResourceType, SectorType, StructureType
 from .events import (
     emit_structure_attacked,
     emit_structure_built,
@@ -31,7 +32,7 @@ from .models import (
 )
 
 
-def get_action_energy_cost(action: Action) -> int:
+def get_action_energy_cost(action: Action, state: GameState | None = None) -> int:
     if action.action_type == ActionType.BUILD_STRUCTURE:
         raw = action.payload.get("structure_type")
         if raw is None:
@@ -41,6 +42,16 @@ def get_action_energy_cost(action: Action) -> int:
         except ValueError:
             return 0
         return BUILD_ENERGY_COSTS.get(st, 0)
+
+    # Ally transfer costs 0 energy
+    if action.action_type == ActionType.TRANSFER_RESOURCE and state is not None:
+        player = state.players.get(action.issuer_player_id)
+        target_pid = action.payload.get("target_player_id")
+        if player is not None and target_pid is not None:
+            stance = player.diplomacy_stance.get(target_pid, DiplomaticStance.NEUTRAL)
+            if stance == DiplomaticStance.ALLY:
+                return 0
+
     return ACTION_ENERGY_COSTS.get(action.action_type, 0)
 
 
@@ -68,7 +79,7 @@ def validate_action(state: GameState, action: Action) -> ValidationResult:
             return ValidationResult(accepted=False, action_id=aid, reason=scope_err)
 
     # 3. Energy affordability
-    cost = get_action_energy_cost(action)
+    cost = get_action_energy_cost(action, state)
     available = compute_player_available_energy(state, action.issuer_player_id)
     remaining = available - player.energy_spent_this_heartbeat
     if remaining < cost:
@@ -123,7 +134,13 @@ def _validate_build(state, action, player):
         return ValidationResult(accepted=False, action_id=aid, reason=f"Unknown structure type '{structure_type}'")
 
     allowed_sector = catalog["allowed_sector"]
-    if sector.sector_type != allowed_sector:
+    # In open world, HAVEN/SETTLED/WASTELAND sectors also accept FRONTIER structures
+    _OW_FRONTIER_COMPATIBLE = {SectorType.HAVEN, SectorType.SETTLED, SectorType.WASTELAND}
+    sector_ok = (
+        sector.sector_type == allowed_sector
+        or (allowed_sector == SectorType.FRONTIER and sector.sector_type in _OW_FRONTIER_COMPATIBLE)
+    )
+    if not sector_ok:
         return ValidationResult(
             accepted=False, action_id=aid,
             reason=f"Structure '{structure_type.value}' not allowed in {sector.sector_type.value} sectors",
@@ -132,7 +149,7 @@ def _validate_build(state, action, player):
     if sector.sector_type == SectorType.SAFE:
         if sector.safe_owner_player_id != player.player_id:
             return ValidationResult(accepted=False, action_id=aid, reason="Player is not safe zone owner")
-    elif sector.sector_type == SectorType.FRONTIER:
+    elif sector.sector_type in (SectorType.FRONTIER, SectorType.HAVEN, SectorType.SETTLED, SectorType.WASTELAND):
         if sector.controller_player_id != player.player_id:
             if sector.controller_player_id is not None:
                 return ValidationResult(accepted=False, action_id=aid, reason="Sector controlled by another player")
@@ -226,6 +243,12 @@ def _validate_attack(state, action, player):
 
     if target.owner_player_id == player.player_id:
         return ValidationResult(accepted=False, action_id=aid, reason="Cannot attack own structure")
+
+    # Diplomacy: ALLY stance prevents attacking target's structures
+    if target.owner_player_id is not None:
+        stance = player.diplomacy_stance.get(target.owner_player_id, DiplomaticStance.NEUTRAL)
+        if stance == DiplomaticStance.ALLY:
+            return ValidationResult(accepted=False, action_id=aid, reason="Cannot attack ally")
 
     # Check attacker has an active ATTACK_NODE in target sector or adjacent controlled sector
     has_attack_node = False
@@ -342,6 +365,11 @@ def _validate_transfer(state, action, player):
     if target is None:
         return ValidationResult(accepted=False, action_id=aid, reason="Target player not found")
 
+    # Diplomacy: HOSTILE stance prevents transfers
+    stance = player.diplomacy_stance.get(target_pid, DiplomaticStance.NEUTRAL)
+    if stance == DiplomaticStance.HOSTILE:
+        return ValidationResult(accepted=False, action_id=aid, reason="Cannot transfer to hostile player")
+
     if amount <= 0:
         return ValidationResult(accepted=False, action_id=aid, reason="Amount must be positive")
 
@@ -362,7 +390,7 @@ def _validate_transfer(state, action, player):
 
 def resolve_action(state: GameState, action: Action) -> None:
     player = state.players[action.issuer_player_id]
-    cost = get_action_energy_cost(action)
+    cost = get_action_energy_cost(action, state)
     at = action.action_type
 
     if at == ActionType.BUILD_STRUCTURE:
@@ -444,16 +472,37 @@ def _resolve_attack(state, action, player, cost):
 
     target_id = action.payload["target_structure_id"]
     target = state.structures[target_id]
-    target.hp -= ATTACK_DAMAGE
 
-    emit_structure_attacked(state, player.player_id, target_id, ATTACK_DAMAGE, target.hp)
+    # Diplomacy: HOSTILE stance gives +50% damage
+    damage = ATTACK_DAMAGE
+    if target.owner_player_id is not None:
+        stance = player.diplomacy_stance.get(target.owner_player_id, DiplomaticStance.NEUTRAL)
+        if stance == DiplomaticStance.HOSTILE:
+            damage = ATTACK_DAMAGE + ATTACK_DAMAGE // 2  # +50%
+
+    # Shield Generator: 50% damage reduction if owner has active shield in same sector
+    if target.owner_player_id is not None and _has_active_shield_in_sector(
+        state, target.owner_player_id, target.sector_id
+    ):
+        damage = damage // 2
+
+    target.hp -= damage
+
+    emit_structure_attacked(state, player.player_id, target_id, damage, target.hp)
 
     if target.hp <= 0:
         sector_id = target.sector_id
-        emit_structure_destroyed(state, target.owner_player_id, target_id, sector_id)
+        owner_player_id = target.owner_player_id
+        is_sanctuary_core = target.structure_type == StructureType.SANCTUARY_CORE
+
+        emit_structure_destroyed(state, owner_player_id, target_id, sector_id)
         del state.structures[target_id]
         state.world.sectors[sector_id].structure_ids.remove(target_id)
         recompute_sector_control(state, sector_id)
+
+        # Check for sanctuary core destruction → elimination or outpost secondary life
+        if is_sanctuary_core:
+            _handle_core_destroyed(state, owner_player_id)
 
 
 def _resolve_scan(state, action, player, cost):
