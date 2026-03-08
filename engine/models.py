@@ -50,6 +50,8 @@ class PlayerState:
     spawn_heartbeat: int = 0
     last_active_heartbeat: int = 0
     gateway_id: str | None = None
+    structures_destroyed: int = 0
+    structures_lost: int = 0
 
 
 @dataclass
@@ -99,6 +101,15 @@ class Action:
 
 
 @dataclass
+class Message:
+    message_id: str
+    from_player_id: str
+    to_player_id: str
+    content: str
+    heartbeat: int
+
+
+@dataclass
 class Event:
     event_id: str
     heartbeat: int
@@ -135,9 +146,13 @@ class GameState:
     structures: dict[str, StructureState] = field(default_factory=dict)
     actions_pending: list[Action] = field(default_factory=list)
     event_log: list[Event] = field(default_factory=list)
+    messages: list[Message] = field(default_factory=list)
     id_counter: int = 0
     open_world: bool = False
     player_counter: int = 0
+    season_history: list[dict] = field(default_factory=list)
+    world_events_active: list[dict] = field(default_factory=list)
+    player_elo: dict[str, int] = field(default_factory=dict)
 
 
 def next_id(state: GameState, prefix: str) -> str:
