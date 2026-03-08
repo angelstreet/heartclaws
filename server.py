@@ -132,6 +132,8 @@ def _build_sector_list(state: GameState) -> list[dict]:
     sectors = []
     for sid, sector in state.world.sectors.items():
         structs = []
+        influence_p1 = 0
+        influence_p2 = 0
         for st_id in sector.structure_ids:
             st = state.structures.get(st_id)
             if st is not None:
@@ -140,28 +142,83 @@ def _build_sector_list(state: GameState) -> list[dict]:
                     "type": st.structure_type.value,
                     "owner": st.owner_player_id,
                     "hp": st.hp,
+                    "max_hp": st.max_hp,
                     "active": st.active,
                 })
+                if st.owner_player_id == P1:
+                    influence_p1 += st.influence
+                elif st.owner_player_id == P2:
+                    influence_p2 += st.influence
         has_metal = any(
             not n.depleted for n in sector.resource_nodes
         )
+        resource_nodes = []
+        for n in sector.resource_nodes:
+            resource_nodes.append({
+                "type": n.resource_type.value,
+                "richness": n.richness,
+                "depleted": n.depleted,
+            })
         sectors.append({
             "id": sector.sector_id,
             "type": sector.sector_type.value,
             "controller": sector.controller_player_id,
             "structures": structs,
             "has_metal": has_metal,
+            "influence_p1": influence_p1,
+            "influence_p2": influence_p2,
+            "resource_nodes": resource_nodes,
         })
     return sectors
 
 
-def _build_player_data(state: GameState, player_id: str, strategy_name: str) -> dict:
+def _build_player_data(
+    state: GameState,
+    player_id: str,
+    strategy_name: str,
+    hb_events: list | None = None,
+) -> dict:
     """Build player resource data for the viewer."""
     p = state.players[player_id]
     income = compute_player_income(state, player_id)
     upkeep = compute_player_upkeep(state, player_id)
     available = compute_player_available_energy(state, player_id) - p.energy_spent_this_heartbeat
     controlled = get_player_controlled_sectors(state, player_id)
+
+    # Structures owned by this player
+    structures = []
+    for st_id, st in state.structures.items():
+        if st.owner_player_id == player_id:
+            structures.append({
+                "id": st.structure_id,
+                "type": st.structure_type.value,
+                "sector": st.sector_id,
+                "hp": st.hp,
+            })
+
+    # Actions this turn (from heartbeat events)
+    actions_this_turn = []
+    if hb_events:
+        for ev in hb_events:
+            if ev.actor_player_id != player_id:
+                continue
+            details = ev.details or {}
+            if ev.event_type == "ACTION_RESOLVED":
+                atype = details.get("action_type", "?")
+                actions_this_turn.append({
+                    "type": atype,
+                    "detail": _action_detail(ev),
+                    "status": "resolved",
+                })
+            elif ev.event_type == "ACTION_FAILED":
+                atype = details.get("action_type", "?")
+                reason = details.get("failure_reason") or details.get("reason", "unknown")
+                actions_this_turn.append({
+                    "type": atype,
+                    "detail": reason,
+                    "status": "failed",
+                })
+
     return {
         "energy_reserve": p.energy_reserve,
         "income": income,
@@ -172,7 +229,28 @@ def _build_player_data(state: GameState, player_id: str, strategy_name: str) -> 
         "biomass": p.biomass,
         "sectors_controlled": len(controlled),
         "strategy": strategy_name,
+        "structures": structures,
+        "actions_this_turn": actions_this_turn,
+        "territory": list(controlled),
     }
+
+
+def _action_detail(ev) -> str:
+    """Build a human-readable detail string from an event."""
+    details = ev.details or {}
+    atype = details.get("action_type", "")
+    payload = details.get("payload", {})
+    if atype == "BUILD_STRUCTURE":
+        stype = payload.get("structure_type", details.get("structure_type", "?"))
+        sector = payload.get("sector_id", details.get("sector_id", "?"))
+        return f"{stype} in {sector}"
+    elif atype == "ATTACK_STRUCTURE":
+        target = payload.get("target_structure_id", details.get("target_structure_id", "?"))
+        return f"target {target}"
+    elif atype == "SCAN_SECTOR":
+        sector = payload.get("sector_id", details.get("sector_id", "?"))
+        return f"scan {sector}"
+    return atype
 
 
 def _build_events(events, hb: int) -> list[dict]:
@@ -226,12 +304,13 @@ def _build_events(events, hb: int) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# WebSocket endpoint: /ws/match
+# WebSocket endpoint: /ws/sim  (continuous open-world simulation)
+# Also aliased as /ws/match for backward compat.
 # ---------------------------------------------------------------------------
 
 
-@app.websocket("/ws/match")
-async def ws_match(websocket: WebSocket):
+async def _run_sim(websocket: WebSocket):
+    """Shared handler for /ws/sim and /ws/match."""
     await websocket.accept()
 
     paused = False
@@ -250,8 +329,7 @@ async def ws_match(websocket: WebSocket):
         p1_name = msg.get("p1", "expansionist")
         p2_name = msg.get("p2", "economist")
         seed = int(msg.get("seed", 42))
-        max_heartbeats = int(msg.get("max_heartbeats", 30))
-        speed_ms = int(msg.get("speed_ms", 500))
+        speed_ms = int(msg.get("speed_ms", 1000))
 
         # Resolve strategies
         try:
@@ -262,18 +340,26 @@ async def ws_match(websocket: WebSocket):
             await websocket.close()
             return
 
-        # Create match runner
+        # Create match runner (max_heartbeats unused — we run indefinitely)
         runner = MatchRunner(
             strategy_p1=strat_p1,
             strategy_p2=strat_p2,
             seed=seed,
-            max_heartbeats=max_heartbeats,
+            max_heartbeats=999_999_999,
             p1_name=p1_name,
             p2_name=p2_name,
         )
 
-        # Run heartbeats
-        for hb in range(1, max_heartbeats + 1):
+        # Running stats accumulators
+        total_structures_built = 0
+        total_structures_destroyed = 0
+        total_control_changes = 0
+        hb = 0
+
+        # Run heartbeats indefinitely until client disconnects
+        while True:
+            hb += 1
+
             # Check for control messages (non-blocking)
             while True:
                 try:
@@ -315,6 +401,15 @@ async def ws_match(websocket: WebSocket):
             # Run one heartbeat
             hb_result = runner.step()
 
+            # Update running stats from this heartbeat's events
+            for ev in hb_result.events:
+                if ev.event_type == "STRUCTURE_BUILT":
+                    total_structures_built += 1
+                elif ev.event_type == "STRUCTURE_DESTROYED":
+                    total_structures_destroyed += 1
+                elif ev.event_type == "SECTOR_CONTROL_CHANGED":
+                    total_control_changes += 1
+
             # Build payload
             payload = {
                 "type": "heartbeat",
@@ -324,86 +419,23 @@ async def ws_match(websocket: WebSocket):
                         "sectors": _build_sector_list(runner.state),
                     },
                     "players": {
-                        "p1": _build_player_data(runner.state, P1, p1_name),
-                        "p2": _build_player_data(runner.state, P2, p2_name),
+                        "p1": _build_player_data(runner.state, P1, p1_name, hb_result.events),
+                        "p2": _build_player_data(runner.state, P2, p2_name, hb_result.events),
                     },
                     "events": _build_events(hb_result.events, hb_result.heartbeat),
+                    "stats": {
+                        "total_heartbeats": hb,
+                        "structures_built": total_structures_built,
+                        "structures_destroyed": total_structures_destroyed,
+                        "control_changes": total_control_changes,
+                    },
                 },
             }
 
             await websocket.send_json(payload)
 
-            # Check win conditions
-            win = runner._check_win()
-            if win is not None:
-                winner, reason = win
-                p1_stats = _collect_stats(runner.state, P1, p1_name, runner.all_events)
-                p2_stats = _collect_stats(runner.state, P2, p2_name, runner.all_events)
-                await websocket.send_json({
-                    "type": "result",
-                    "data": {
-                        "winner": winner,
-                        "reason": reason,
-                        "heartbeats": hb,
-                        "stats": {
-                            "p1": {
-                                "strategy": p1_name,
-                                "sectors_controlled": p1_stats.sectors_controlled,
-                                "structures_built": p1_stats.structures_built,
-                                "structures_lost": p1_stats.structures_lost,
-                                "attacks_made": p1_stats.attacks_made,
-                                "total_energy_earned": p1_stats.total_energy_earned,
-                                "final_metal": p1_stats.final_metal,
-                            },
-                            "p2": {
-                                "strategy": p2_name,
-                                "sectors_controlled": p2_stats.sectors_controlled,
-                                "structures_built": p2_stats.structures_built,
-                                "structures_lost": p2_stats.structures_lost,
-                                "attacks_made": p2_stats.attacks_made,
-                                "total_energy_earned": p2_stats.total_energy_earned,
-                                "final_metal": p2_stats.final_metal,
-                            },
-                        },
-                    },
-                })
-                return
-
             # Delay between heartbeats
             await asyncio.sleep(speed_ms / 1000.0)
-
-        # Timeout — match ended without early win
-        winner = _check_timeout_winner(runner.state)
-        p1_stats = _collect_stats(runner.state, P1, p1_name, runner.all_events)
-        p2_stats = _collect_stats(runner.state, P2, p2_name, runner.all_events)
-        await websocket.send_json({
-            "type": "result",
-            "data": {
-                "winner": winner,
-                "reason": "timeout",
-                "heartbeats": max_heartbeats,
-                "stats": {
-                    "p1": {
-                        "strategy": p1_name,
-                        "sectors_controlled": p1_stats.sectors_controlled,
-                        "structures_built": p1_stats.structures_built,
-                        "structures_lost": p1_stats.structures_lost,
-                        "attacks_made": p1_stats.attacks_made,
-                        "total_energy_earned": p1_stats.total_energy_earned,
-                        "final_metal": p1_stats.final_metal,
-                    },
-                    "p2": {
-                        "strategy": p2_name,
-                        "sectors_controlled": p2_stats.sectors_controlled,
-                        "structures_built": p2_stats.structures_built,
-                        "structures_lost": p2_stats.structures_lost,
-                        "attacks_made": p2_stats.attacks_made,
-                        "total_energy_earned": p2_stats.total_energy_earned,
-                        "final_metal": p2_stats.final_metal,
-                    },
-                },
-            },
-        })
 
     except WebSocketDisconnect:
         pass
@@ -412,6 +444,16 @@ async def ws_match(websocket: WebSocket):
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
             pass
+
+
+@app.websocket("/ws/sim")
+async def ws_sim(websocket: WebSocket):
+    await _run_sim(websocket)
+
+
+@app.websocket("/ws/match")
+async def ws_match(websocket: WebSocket):
+    await _run_sim(websocket)
 
 
 # ---------------------------------------------------------------------------
