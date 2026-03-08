@@ -1,3 +1,9 @@
+"""AI strategies for HeartClaws agents.
+
+Each strategy implements decide(state, player_id) -> list[Action].
+Strategies should ALWAYS produce actions when possible — an idle agent is a dead agent.
+"""
+
 from __future__ import annotations
 
 import random
@@ -53,6 +59,24 @@ def _get_buildable_sectors(state: GameState, player_id: str) -> list[str]:
     return sorted(frontier_controlled | adjacent_uncontrolled)
 
 
+def _get_expandable_frontier(state: GameState, player_id: str) -> list[str]:
+    """Frontier sectors adjacent to owned territory that are uncontrolled or enemy-controlled."""
+    controlled = set(_get_player_controlled_sectors(state, player_id))
+    safe = set(_get_player_safe_sectors(state, player_id))
+    owned = controlled | safe
+
+    result: list[str] = []
+    for sid in sorted(owned):
+        sec = state.world.sectors[sid]
+        for adj_id in sorted(sec.adjacent_sector_ids):
+            adj = state.world.sectors.get(adj_id)
+            if adj is None or adj.sector_type != SectorType.FRONTIER:
+                continue
+            if adj.controller_player_id != player_id and adj_id not in result:
+                result.append(adj_id)
+    return result
+
+
 def _get_sectors_with_metal(state: GameState, sector_ids: list[str]) -> list[str]:
     return sorted(
         sid for sid in sector_ids
@@ -77,6 +101,18 @@ def _player_structures_of_type(
         st_id for st_id, st in state.structures.items()
         if st.owner_player_id == player_id and st.structure_type == structure_type and st.active
     )
+
+
+def _count_player_structures_in_sector(
+    state: GameState, player_id: str, sector_id: str, structure_type: StructureType
+) -> int:
+    """Count how many structures of a type the player has in a sector."""
+    count = 0
+    for st_id in _get_structures_in_sector(state, sector_id):
+        st = state.structures.get(st_id)
+        if st and st.owner_player_id == player_id and st.structure_type == structure_type:
+            count += 1
+    return count
 
 
 def _enemy_structures_in_reach(state: GameState, player_id: str) -> list[str]:
@@ -183,6 +219,19 @@ def _filter_affordable(state: GameState, player_id: str, actions: list[Action]) 
     return result
 
 
+def _try_build(state: GameState, player_id: str, sector_id: str, stype: StructureType,
+               actions: list[Action], budget: list[int], max_actions: int = 3) -> bool:
+    """Try to add a build action. Returns True if successful. budget is a 1-element list for mutability."""
+    if len(actions) >= max_actions:
+        return False
+    if not _can_afford_build(state, player_id, stype, budget[0]):
+        return False
+    act = _make_build_action(state, player_id, sector_id, stype)
+    actions.append(act)
+    budget[0] -= act.energy_cost
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
@@ -195,7 +244,7 @@ class Strategy:
 
 
 # ---------------------------------------------------------------------------
-# 1. RandomStrategy
+# 1. RandomStrategy — random valid moves (chaos baseline)
 # ---------------------------------------------------------------------------
 
 class RandomStrategy(Strategy):
@@ -217,17 +266,24 @@ class RandomStrategy(Strategy):
             StructureType.RELAY, StructureType.TOWER, StructureType.ATTACK_NODE,
         ]
 
-        num_actions = rng.randint(0, 3)
+        num_actions = rng.randint(1, 3)
         for _ in range(num_actions):
             roll = rng.random()
-            if roll < 0.15:
+            if roll < 0.1:
+                # Scan
                 controlled = _get_player_controlled_sectors(state, player_id)
                 safe = _get_player_safe_sectors(state, player_id)
                 scannable = sorted(set(controlled) | set(safe))
                 if scannable:
                     sector_id = rng.choice(scannable)
                     actions.append(_make_scan_action(state, player_id, sector_id))
-            elif roll < 0.9 and buildable:
+            elif roll < 0.2:
+                # Attack
+                targets = _enemy_structures_in_reach(state, player_id)
+                if targets:
+                    actions.append(_make_attack_action(state, player_id, rng.choice(targets)))
+            else:
+                # Build
                 sector_id = rng.choice(buildable)
                 st_type = rng.choice(buildable_types)
                 if _can_afford_build(state, player_id, st_type, _remaining_energy(state, player_id)):
@@ -237,7 +293,7 @@ class RandomStrategy(Strategy):
 
 
 # ---------------------------------------------------------------------------
-# 2. ExpansionistStrategy
+# 2. ExpansionistStrategy — claim territory aggressively, build everywhere
 # ---------------------------------------------------------------------------
 
 class ExpansionistStrategy(Strategy):
@@ -245,87 +301,55 @@ class ExpansionistStrategy(Strategy):
 
     def decide(self, state: GameState, player_id: str) -> list[Action]:
         actions: list[Action] = []
-        budget = _remaining_energy(state, player_id)
+        budget = [_remaining_energy(state, player_id)]
 
         controlled = set(_get_player_controlled_sectors(state, player_id))
         safe = set(_get_player_safe_sectors(state, player_id))
         owned = controlled | safe
+        buildable = _get_buildable_sectors(state, player_id)
+        expandable = _get_expandable_frontier(state, player_id)
+        frontier_controlled = sorted(s for s in controlled if state.world.sectors[s].sector_type == SectorType.FRONTIER)
 
-        frontier_uncontrolled: list[str] = []
-        for sid in sorted(owned):
-            sec = state.world.sectors[sid]
-            for adj_id in sorted(sec.adjacent_sector_ids):
-                adj = state.world.sectors.get(adj_id)
-                if (
-                    adj is not None
-                    and adj.sector_type == SectorType.FRONTIER
-                    and adj.controller_player_id is None
-                    and adj_id not in frontier_uncontrolled
-                ):
-                    frontier_uncontrolled.append(adj_id)
-
-        # First tower to expand
-        for sid in frontier_uncontrolled:
-            if len(actions) >= 3:
-                break
-            if _can_afford_build(state, player_id, StructureType.TOWER, budget):
-                act = _make_build_action(state, player_id, sid, StructureType.TOWER)
-                actions.append(act)
-                budget -= act.energy_cost
-                break
-
-        # Prioritize extractor on metal nodes early — metal is the limiting resource
         extractor_count = len(_player_structures_of_type(state, player_id, StructureType.EXTRACTOR))
-        if extractor_count == 0:
-            # Check all owned sectors (safe + controlled) for metal
-            all_owned_sectors = sorted(owned)
-            metal_owned = _get_sectors_with_metal(state, all_owned_sectors)
-            for sid in metal_owned:
-                if len(actions) >= 3:
-                    break
-                existing_extractors = [
-                    st_id for st_id in _get_structures_in_sector(state, sid)
-                    if state.structures.get(st_id) is not None
-                    and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                    and state.structures[st_id].owner_player_id == player_id
-                ]
-                if not existing_extractors and _can_afford_build(state, player_id, StructureType.EXTRACTOR, budget):
-                    act = _make_build_action(state, player_id, sid, StructureType.EXTRACTOR)
-                    actions.append(act)
-                    budget -= act.energy_cost
-                    break
 
-        # Then more extractors on controlled frontier metal sectors
-        metal_sectors = _get_sectors_with_metal(state, sorted(controlled))
-        for sid in metal_sectors:
+        # 1. CRITICAL: Build extractors on metal FIRST — without metal income, everything stalls
+        if extractor_count < max(1, len(frontier_controlled) // 2):
+            metal_buildable = _get_sectors_with_metal(state, buildable)
+            for sid in metal_buildable:
+                if len(actions) >= 2:
+                    break
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.EXTRACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.EXTRACTOR, actions, budget)
+
+        # 2. Expand — claim new territory with towers
+        for sid in expandable:
             if len(actions) >= 3:
                 break
-            existing_extractors = [
-                st_id for st_id in _get_structures_in_sector(state, sid)
-                if state.structures.get(st_id) is not None
-                and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                and state.structures[st_id].owner_player_id == player_id
-            ]
-            if not existing_extractors and _can_afford_build(state, player_id, StructureType.EXTRACTOR, budget):
-                act = _make_build_action(state, player_id, sid, StructureType.EXTRACTOR)
-                actions.append(act)
-                budget -= act.energy_cost
+            _try_build(state, player_id, sid, StructureType.TOWER, actions, budget)
 
-        if len(actions) < 3:
-            relay_count = len(_player_structures_of_type(state, player_id, StructureType.RELAY))
-            tower_count = len(_player_structures_of_type(state, player_id, StructureType.TOWER))
-            if tower_count > relay_count * 3 and len(controlled) > 0:
-                target_sector = sorted(controlled)[0]
-                if _can_afford_build(state, player_id, StructureType.RELAY, budget):
-                    act = _make_build_action(state, player_id, target_sector, StructureType.RELAY)
-                    actions.append(act)
-                    budget -= act.energy_cost
+        # 3. Reinforce controlled sectors — add towers for influence
+        for sid in frontier_controlled:
+            if len(actions) >= 3:
+                break
+            tower_count = _count_player_structures_in_sector(state, player_id, sid, StructureType.TOWER)
+            if tower_count < 2:
+                _try_build(state, player_id, sid, StructureType.TOWER, actions, budget)
+
+        # 4. Build relays for throughput (1 per 3 sectors)
+        relay_count = len(_player_structures_of_type(state, player_id, StructureType.RELAY))
+        if relay_count * 3 < len(frontier_controlled) and frontier_controlled and len(actions) < 3:
+            _try_build(state, player_id, frontier_controlled[0], StructureType.RELAY, actions, budget)
+
+        # 5. Build reactors for energy (1 per 4 sectors)
+        reactor_count = len(_player_structures_of_type(state, player_id, StructureType.REACTOR))
+        if reactor_count * 4 < len(frontier_controlled) and frontier_controlled and len(actions) < 3:
+            _try_build(state, player_id, frontier_controlled[-1], StructureType.REACTOR, actions, budget)
 
         return _filter_affordable(state, player_id, actions)
 
 
 # ---------------------------------------------------------------------------
-# 3. EconomistStrategy
+# 3. EconomistStrategy — maximize income, then expand with surplus
 # ---------------------------------------------------------------------------
 
 class EconomistStrategy(Strategy):
@@ -333,117 +357,70 @@ class EconomistStrategy(Strategy):
 
     def decide(self, state: GameState, player_id: str) -> list[Action]:
         actions: list[Action] = []
-        budget = _remaining_energy(state, player_id)
+        budget = [_remaining_energy(state, player_id)]
+        player = state.players[player_id]
 
         controlled = sorted(_get_player_controlled_sectors(state, player_id))
         safe = sorted(_get_player_safe_sectors(state, player_id))
         owned = sorted(set(controlled) | set(safe))
         buildable = _get_buildable_sectors(state, player_id)
-
-        reactor_count = len(_player_structures_of_type(state, player_id, StructureType.REACTOR))
-        battery_count = len(_player_structures_of_type(state, player_id, StructureType.BATTERY))
-        extractor_count = len(_player_structures_of_type(state, player_id, StructureType.EXTRACTOR))
-
+        expandable = _get_expandable_frontier(state, player_id)
         frontier_controlled = [s for s in controlled if state.world.sectors[s].sector_type == SectorType.FRONTIER]
 
-        # FIRST priority: expand into frontier if no frontier sectors controlled
-        # (Without frontier territory, reactors/batteries can't be built)
-        if not frontier_controlled:
-            frontier_uncontrolled: list[str] = []
-            for sid in owned:
-                sec = state.world.sectors[sid]
-                for adj_id in sorted(sec.adjacent_sector_ids):
-                    adj = state.world.sectors.get(adj_id)
-                    if (
-                        adj is not None
-                        and adj.sector_type == SectorType.FRONTIER
-                        and adj.controller_player_id is None
-                        and adj_id not in frontier_uncontrolled
-                    ):
-                        frontier_uncontrolled.append(adj_id)
-            if frontier_uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER, budget):
-                act = _make_build_action(state, player_id, frontier_uncontrolled[0], StructureType.TOWER)
-                actions.append(act)
-                budget -= act.energy_cost
-                return _filter_affordable(state, player_id, actions)
+        extractor_count = len(_player_structures_of_type(state, player_id, StructureType.EXTRACTOR))
+        reactor_count = len(_player_structures_of_type(state, player_id, StructureType.REACTOR))
+        battery_count = len(_player_structures_of_type(state, player_id, StructureType.BATTERY))
 
-        # SECOND priority: build extractor on metal nodes — metal is the limiting resource
-        if extractor_count == 0:
-            # Check all owned sectors for metal first
-            metal_owned = _get_sectors_with_metal(state, owned)
-            for sid in metal_owned:
+        # 1. CRITICAL: Build extractors on metal nodes FIRST — economy is everything
+        metal_buildable = _get_sectors_with_metal(state, buildable)
+        target_extractors = max(1, len(metal_buildable))  # economist wants ALL metal nodes
+        if extractor_count < target_extractors:
+            for sid in metal_buildable:
                 if len(actions) >= 2:
                     break
-                existing = [
-                    st_id for st_id in _get_structures_in_sector(state, sid)
-                    if state.structures.get(st_id) is not None
-                    and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                    and state.structures[st_id].owner_player_id == player_id
-                ]
-                if not existing and _can_afford_build(state, player_id, StructureType.EXTRACTOR, budget):
-                    act = _make_build_action(state, player_id, sid, StructureType.EXTRACTOR)
-                    actions.append(act)
-                    budget -= act.energy_cost
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.EXTRACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.EXTRACTOR, actions, budget)
+
+        # 2. Expand to reach more metal nodes and territory
+        if len(actions) < 3:
+            # Prefer sectors with metal
+            metal_expandable = _get_sectors_with_metal(state, expandable)
+            other_expandable = [s for s in expandable if s not in metal_expandable]
+            for sid in metal_expandable + other_expandable:
+                if len(actions) >= 3:
                     break
+                _try_build(state, player_id, sid, StructureType.TOWER, actions, budget)
 
-        # THIRD: build reactors in controlled frontier sectors
-        if reactor_count < 2 and frontier_controlled:
-            target = frontier_controlled[0]
-            if _can_afford_build(state, player_id, StructureType.REACTOR, budget) and len(actions) < 3:
-                act = _make_build_action(state, player_id, target, StructureType.REACTOR)
-                actions.append(act)
-                budget -= act.energy_cost
-
-        # FOURTH: more extractors on metal sectors
-        metal_sectors = _get_sectors_with_metal(state, buildable)
-        for sid in metal_sectors:
-            if len(actions) >= 3:
-                break
-            existing = [
-                st_id for st_id in _get_structures_in_sector(state, sid)
-                if state.structures.get(st_id) is not None
-                and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                and state.structures[st_id].owner_player_id == player_id
-            ]
-            if not existing and _can_afford_build(state, player_id, StructureType.EXTRACTOR, budget):
-                act = _make_build_action(state, player_id, sid, StructureType.EXTRACTOR)
-                actions.append(act)
-                budget -= act.energy_cost
-
-        # FIFTH: batteries
-        if battery_count < reactor_count and len(actions) < 3:
+        # 3. Reactors — build up energy income (target: 1 per 2 sectors)
+        target_reactors = max(1, len(frontier_controlled) // 2)
+        if reactor_count < target_reactors and frontier_controlled and len(actions) < 3:
             for sid in frontier_controlled:
-                if _can_afford_build(state, player_id, StructureType.BATTERY, budget):
-                    act = _make_build_action(state, player_id, sid, StructureType.BATTERY)
-                    actions.append(act)
-                    budget -= act.energy_cost
+                if len(actions) >= 3:
+                    break
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.REACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.REACTOR, actions, budget)
                     break
 
-        # SIXTH: expand more when we have surplus metal
-        player = state.players[player_id]
-        if len(actions) < 3 and player.metal > 15:
-            frontier_uncontrolled2: list[str] = []
-            for sid in owned:
-                sec = state.world.sectors[sid]
-                for adj_id in sorted(sec.adjacent_sector_ids):
-                    adj = state.world.sectors.get(adj_id)
-                    if (
-                        adj is not None
-                        and adj.sector_type == SectorType.FRONTIER
-                        and adj.controller_player_id is None
-                        and adj_id not in frontier_uncontrolled2
-                    ):
-                        frontier_uncontrolled2.append(adj_id)
-            if frontier_uncontrolled2 and _can_afford_build(state, player_id, StructureType.TOWER, budget):
-                act = _make_build_action(state, player_id, frontier_uncontrolled2[0], StructureType.TOWER)
-                actions.append(act)
-                budget -= act.energy_cost
+        # 4. Batteries — store surplus energy (target: match reactor count)
+        if battery_count < reactor_count and frontier_controlled and len(actions) < 3:
+            for sid in frontier_controlled:
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.BATTERY) == 0:
+                    _try_build(state, player_id, sid, StructureType.BATTERY, actions, budget)
+                    break
+
+        # 5. Relays for throughput
+        relay_count = len(_player_structures_of_type(state, player_id, StructureType.RELAY))
+        if relay_count < reactor_count and frontier_controlled and len(actions) < 3:
+            for sid in frontier_controlled:
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.RELAY) == 0:
+                    _try_build(state, player_id, sid, StructureType.RELAY, actions, budget)
+                    break
 
         return _filter_affordable(state, player_id, actions)
 
 
 # ---------------------------------------------------------------------------
-# 4. AggressorStrategy
+# 4. AggressorStrategy — attack enemies, build attack nodes, expand toward enemy
 # ---------------------------------------------------------------------------
 
 class AggressorStrategy(Strategy):
@@ -451,21 +428,36 @@ class AggressorStrategy(Strategy):
 
     def decide(self, state: GameState, player_id: str) -> list[Action]:
         actions: list[Action] = []
-        budget = _remaining_energy(state, player_id)
+        budget = [_remaining_energy(state, player_id)]
 
         controlled = set(_get_player_controlled_sectors(state, player_id))
         safe = set(_get_player_safe_sectors(state, player_id))
         owned = controlled | safe
+        buildable = _get_buildable_sectors(state, player_id)
+        expandable = _get_expandable_frontier(state, player_id)
+        frontier_controlled = sorted(s for s in controlled if state.world.sectors[s].sector_type == SectorType.FRONTIER)
 
-        attack_nodes = _player_structures_of_type(state, player_id, StructureType.ATTACK_NODE)
+        extractor_count = len(_player_structures_of_type(state, player_id, StructureType.EXTRACTOR))
+        attack_node_count = len(_player_structures_of_type(state, player_id, StructureType.ATTACK_NODE))
 
+        # 1. CRITICAL: Need at least 1 extractor for metal income
+        if extractor_count == 0:
+            metal_buildable = _get_sectors_with_metal(state, buildable)
+            for sid in metal_buildable:
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.EXTRACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.EXTRACTOR, actions, budget)
+                    break
+
+        # 2. Attack any enemy structures in reach (priority: reactors > batteries > rest)
         enemy_targets = _enemy_structures_in_reach(state, player_id)
         priority_targets = sorted(
             enemy_targets,
             key=lambda st_id: (
                 0 if state.structures[st_id].structure_type == StructureType.REACTOR else
                 1 if state.structures[st_id].structure_type == StructureType.BATTERY else
-                2,
+                2 if state.structures[st_id].structure_type == StructureType.ATTACK_NODE else
+                3,
+                state.structures[st_id].hp,  # lowest HP first
                 st_id,
             ),
         )
@@ -473,98 +465,53 @@ class AggressorStrategy(Strategy):
         for target_id in priority_targets:
             if len(actions) >= 2:
                 break
-            if budget >= 6:
+            if budget[0] >= 6:
                 act = _make_attack_action(state, player_id, target_id)
                 actions.append(act)
-                budget -= act.energy_cost
+                budget[0] -= act.energy_cost
 
-        if not attack_nodes or len(actions) < 2:
-            enemy_adjacent: list[str] = []
-            for sid in sorted(owned):
-                sec = state.world.sectors[sid]
-                for adj_id in sorted(sec.adjacent_sector_ids):
-                    adj = state.world.sectors.get(adj_id)
-                    if adj is None or adj.sector_type != SectorType.FRONTIER:
-                        continue
-                    has_enemy = any(
-                        state.structures.get(st_id) is not None
-                        and state.structures[st_id].owner_player_id != player_id
-                        for st_id in adj.structure_ids
-                    )
-                    if has_enemy or (adj.controller_player_id is not None and adj.controller_player_id != player_id):
-                        if adj_id not in enemy_adjacent:
-                            enemy_adjacent.append(adj_id)
-
-            need_tower = False
-            for sid in enemy_adjacent:
-                sec = state.world.sectors[sid]
-                if sec.controller_player_id != player_id and sec.controller_player_id is not None:
-                    need_tower = True
-                    break
-                if sec.controller_player_id is None:
-                    need_tower = True
+        # 3. Build attack nodes (1 per 2 sectors, at least 1)
+        target_nodes = max(1, len(frontier_controlled) // 2)
+        if attack_node_count < target_nodes and len(actions) < 3:
+            for sid in frontier_controlled:
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.ATTACK_NODE) == 0:
+                    _try_build(state, player_id, sid, StructureType.ATTACK_NODE, actions, budget)
                     break
 
-            buildable = _get_buildable_sectors(state, player_id)
+        # 4. Expand toward enemy territory
+        enemy_adjacent_expand = []
+        neutral_expand = []
+        for sid in expandable:
+            sec = state.world.sectors[sid]
+            if sec.controller_player_id and sec.controller_player_id != player_id:
+                enemy_adjacent_expand.append(sid)
+            else:
+                neutral_expand.append(sid)
 
-            if need_tower and not attack_nodes and buildable:
-                target_sector = buildable[0]
-                if enemy_adjacent:
-                    for ea in enemy_adjacent:
-                        if ea in buildable:
-                            target_sector = ea
-                            break
-                if _can_afford_build(state, player_id, StructureType.TOWER, budget) and len(actions) < 3:
-                    act = _make_build_action(state, player_id, target_sector, StructureType.TOWER)
-                    actions.append(act)
-                    budget -= act.energy_cost
+        for sid in enemy_adjacent_expand + neutral_expand:
+            if len(actions) >= 3:
+                break
+            _try_build(state, player_id, sid, StructureType.TOWER, actions, budget)
 
-            if len(actions) < 3 and buildable:
-                node_sector = None
-                for sid in sorted(controlled):
-                    if sid in buildable:
-                        node_sector = sid
-                        break
-                if node_sector is None and buildable:
-                    node_sector = buildable[0]
-                if node_sector and _can_afford_build(state, player_id, StructureType.ATTACK_NODE, budget):
-                    act = _make_build_action(state, player_id, node_sector, StructureType.ATTACK_NODE)
-                    actions.append(act)
-                    budget -= act.energy_cost
-
-        # Build extractor early so aggressor doesn't run out of metal
-        extractor_count = len(_player_structures_of_type(state, player_id, StructureType.EXTRACTOR))
-        if extractor_count == 0 and len(actions) < 4:
-            all_owned = sorted(controlled | safe)
-            metal_owned = _get_sectors_with_metal(state, all_owned)
-            for sid in metal_owned:
-                existing = [
-                    st_id for st_id in _get_structures_in_sector(state, sid)
-                    if state.structures.get(st_id) is not None
-                    and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                    and state.structures[st_id].owner_player_id == player_id
-                ]
-                if not existing and _can_afford_build(state, player_id, StructureType.EXTRACTOR, budget):
-                    act = _make_build_action(state, player_id, sid, StructureType.EXTRACTOR)
-                    actions.append(act)
-                    budget -= act.energy_cost
+        # 5. More extractors for sustained war economy
+        if extractor_count >= 1 and len(actions) < 3:
+            metal_buildable = _get_sectors_with_metal(state, buildable)
+            for sid in metal_buildable:
+                if len(actions) >= 3:
                     break
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.EXTRACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.EXTRACTOR, actions, budget)
 
-        if len(actions) < 4:
-            buildable = _get_buildable_sectors(state, player_id)
-            frontier_uncontrolled = [
-                sid for sid in buildable if state.world.sectors[sid].controller_player_id is None
-            ]
-            if frontier_uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER, budget):
-                act = _make_build_action(state, player_id, frontier_uncontrolled[0], StructureType.TOWER)
-                actions.append(act)
-                budget -= act.energy_cost
+        # 6. Build a reactor if energy is low
+        reactor_count = len(_player_structures_of_type(state, player_id, StructureType.REACTOR))
+        if reactor_count < 1 and frontier_controlled and len(actions) < 3:
+            _try_build(state, player_id, frontier_controlled[0], StructureType.REACTOR, actions, budget)
 
         return _filter_affordable(state, player_id, actions)
 
 
 # ---------------------------------------------------------------------------
-# 5. TurtleStrategy
+# 5. TurtleStrategy — defend few sectors heavily, build tall not wide
 # ---------------------------------------------------------------------------
 
 class TurtleStrategy(Strategy):
@@ -572,92 +519,70 @@ class TurtleStrategy(Strategy):
 
     def decide(self, state: GameState, player_id: str) -> list[Action]:
         actions: list[Action] = []
-        budget = _remaining_energy(state, player_id)
+        budget = [_remaining_energy(state, player_id)]
 
         controlled = sorted(_get_player_controlled_sectors(state, player_id))
         safe = sorted(_get_player_safe_sectors(state, player_id))
         owned = sorted(set(controlled) | set(safe))
         buildable = _get_buildable_sectors(state, player_id)
-
-        tower_count = len(_player_structures_of_type(state, player_id, StructureType.TOWER))
-        battery_count = len(_player_structures_of_type(state, player_id, StructureType.BATTERY))
-        relay_count = len(_player_structures_of_type(state, player_id, StructureType.RELAY))
-        reactor_count = len(_player_structures_of_type(state, player_id, StructureType.REACTOR))
-
-        max_frontier_sectors = 3
+        expandable = _get_expandable_frontier(state, player_id)
         frontier_controlled = [s for s in controlled if state.world.sectors[s].sector_type == SectorType.FRONTIER]
 
-        if len(frontier_controlled) < max_frontier_sectors:
-            adjacent: list[str] = []
-            for sid in owned:
-                sec = state.world.sectors[sid]
-                for adj_id in sorted(sec.adjacent_sector_ids):
-                    adj = state.world.sectors.get(adj_id)
-                    if (
-                        adj is not None
-                        and adj.sector_type == SectorType.FRONTIER
-                        and adj.controller_player_id is None
-                        and adj_id not in adjacent
-                    ):
-                        adjacent.append(adj_id)
-            if adjacent and _can_afford_build(state, player_id, StructureType.TOWER, budget):
-                act = _make_build_action(state, player_id, adjacent[0], StructureType.TOWER)
-                actions.append(act)
-                budget -= act.energy_cost
-
-        # Build extractor early in controlled sectors — metal is the limiting resource
         extractor_count = len(_player_structures_of_type(state, player_id, StructureType.EXTRACTOR))
-        if extractor_count == 0 and len(actions) < 2:
-            all_owned = sorted(set(controlled) | set(safe))
-            metal_owned = _get_sectors_with_metal(state, all_owned)
-            for sid in metal_owned:
-                existing = [
-                    st_id for st_id in _get_structures_in_sector(state, sid)
-                    if state.structures.get(st_id) is not None
-                    and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                    and state.structures[st_id].owner_player_id == player_id
-                ]
-                if not existing and _can_afford_build(state, player_id, StructureType.EXTRACTOR, budget):
-                    act = _make_build_action(state, player_id, sid, StructureType.EXTRACTOR)
-                    actions.append(act)
-                    budget -= act.energy_cost
-                    break
+        max_frontier_sectors = 4  # Turtle limits expansion
 
+        # 1. CRITICAL: Build extractors on metal nodes FIRST
+        if extractor_count < 2:
+            metal_buildable = _get_sectors_with_metal(state, buildable)
+            for sid in metal_buildable:
+                if len(actions) >= 1:
+                    break
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.EXTRACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.EXTRACTOR, actions, budget)
+
+        # 2. Expand to a few frontier sectors (up to max)
+        if len(frontier_controlled) < max_frontier_sectors:
+            for sid in expandable:
+                if len(actions) >= 2:
+                    break
+                sec = state.world.sectors[sid]
+                if sec.controller_player_id is None:
+                    _try_build(state, player_id, sid, StructureType.TOWER, actions, budget)
+
+        # 3. Fortify — stack towers in controlled sectors (up to 3 per sector)
         for sid in frontier_controlled:
-            if len(actions) >= 2:
+            if len(actions) >= 3:
                 break
-            player_towers_here = [
-                st_id for st_id in _get_structures_in_sector(state, sid)
-                if state.structures.get(st_id) is not None
-                and state.structures[st_id].structure_type == StructureType.TOWER
-                and state.structures[st_id].owner_player_id == player_id
-            ]
-            if len(player_towers_here) < 2 and _can_afford_build(state, player_id, StructureType.TOWER, budget):
-                act = _make_build_action(state, player_id, sid, StructureType.TOWER)
-                actions.append(act)
-                budget -= act.energy_cost
+            tower_count = _count_player_structures_in_sector(state, player_id, sid, StructureType.TOWER)
+            if tower_count < 3:
+                _try_build(state, player_id, sid, StructureType.TOWER, actions, budget)
 
-        if len(actions) < 2 and reactor_count < 1 and buildable:
-            target = frontier_controlled[0] if frontier_controlled else buildable[0]
-            if _can_afford_build(state, player_id, StructureType.REACTOR, budget):
-                act = _make_build_action(state, player_id, target, StructureType.REACTOR)
-                actions.append(act)
-                budget -= act.energy_cost
-
-        if len(actions) < 3 and battery_count < tower_count:
+        # 4. Build reactors (1 per 2 sectors)
+        reactor_count = len(_player_structures_of_type(state, player_id, StructureType.REACTOR))
+        target_reactors = max(1, len(frontier_controlled) // 2)
+        if reactor_count < target_reactors and frontier_controlled and len(actions) < 3:
             for sid in frontier_controlled:
-                if _can_afford_build(state, player_id, StructureType.BATTERY, budget):
-                    act = _make_build_action(state, player_id, sid, StructureType.BATTERY)
-                    actions.append(act)
-                    budget -= act.energy_cost
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.REACTOR) == 0:
+                    _try_build(state, player_id, sid, StructureType.REACTOR, actions, budget)
                     break
 
-        if len(actions) < 3 and relay_count < 1 and frontier_controlled:
-            target = frontier_controlled[0]
-            if _can_afford_build(state, player_id, StructureType.RELAY, budget):
-                act = _make_build_action(state, player_id, target, StructureType.RELAY)
-                actions.append(act)
-                budget -= act.energy_cost
+        # 5. Batteries to store energy
+        battery_count = len(_player_structures_of_type(state, player_id, StructureType.BATTERY))
+        if battery_count < reactor_count and frontier_controlled and len(actions) < 3:
+            for sid in frontier_controlled:
+                if _count_player_structures_in_sector(state, player_id, sid, StructureType.BATTERY) == 0:
+                    _try_build(state, player_id, sid, StructureType.BATTERY, actions, budget)
+                    break
+
+        # 6. Relays for throughput
+        relay_count = len(_player_structures_of_type(state, player_id, StructureType.RELAY))
+        if relay_count < 1 and frontier_controlled and len(actions) < 3:
+            _try_build(state, player_id, frontier_controlled[0], StructureType.RELAY, actions, budget)
+
+        # 7. Attack nodes for defense (1 per 3 sectors)
+        attack_count = len(_player_structures_of_type(state, player_id, StructureType.ATTACK_NODE))
+        if attack_count * 3 < len(frontier_controlled) and frontier_controlled and len(actions) < 3:
+            _try_build(state, player_id, frontier_controlled[-1], StructureType.ATTACK_NODE, actions, budget)
 
         return _filter_affordable(state, player_id, actions)
 
@@ -669,3 +594,21 @@ ALL_STRATEGIES: dict[str, type[Strategy]] = {
     "aggressor": AggressorStrategy,
     "turtle": TurtleStrategy,
 }
+
+
+def get_strategy(name: str):
+    """Return a callable(state, player_id, rng) for the named strategy.
+
+    This is the entry point used by autoplay.py / server.py.
+    The rng argument is accepted for API compatibility but ignored
+    (engine strategies use deterministic logic based on game state).
+    """
+    if name not in ALL_STRATEGIES:
+        raise ValueError(f"Unknown strategy: '{name}'. Available: {', '.join(ALL_STRATEGIES)}")
+    instance = ALL_STRATEGIES[name](seed=0) if name == "random" else ALL_STRATEGIES[name]()
+
+    def _call(state: GameState, player_id: str, rng=None) -> list[Action]:
+        return instance.decide(state, player_id)
+
+    _call.name = name
+    return _call
