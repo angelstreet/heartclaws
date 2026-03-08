@@ -643,8 +643,8 @@
   <h1>HeartClaws</h1>
 
   <div class="mode-selector">
-    <button class="mode-btn active" data-mode="match">Match</button>
-    <button class="mode-btn" data-mode="openworld">Open World</button>
+    <button class="mode-btn" data-mode="match">Match</button>
+    <button class="mode-btn active" data-mode="openworld">Open World</button>
   </div>
 
   <!-- Match mode controls -->
@@ -799,7 +799,7 @@
   };
 
   // ---- Mode state ----
-  var currentMode = 'match'; // 'match' or 'openworld'
+  var currentMode = 'openworld'; // 'match' or 'openworld'
   var owWorldCreated = false;
   var owPlayerColorMap = {}; // name -> color
   var owPlayerIndex = 0;
@@ -1266,7 +1266,7 @@
     grid.className = 'ow-map-grid';
     for (var r = 0; r < 8; r++) {
       for (var c = 0; c < 8; c++) {
-        var sid = 'H_' + r + '_' + c;
+        var sid = 'H_' + c + '_' + r;  // H_{q}_{r} where q=column, r=row
         var wrapper = document.createElement('div');
         wrapper.style.position = 'relative';
 
@@ -1344,7 +1344,7 @@
   }
 
   function owUpdateTooltipContent(r, c) {
-    var sid = 'H_' + r + '_' + c;
+    var sid = 'H_' + c + '_' + r;  // H_{q}_{r}
     var tt = document.getElementById('ow-tooltip-' + r + '-' + c);
     var s = owSectorData[sid];
     if (!tt || !s) return;
@@ -1400,7 +1400,7 @@
 
     for (var r = 0; r < 8; r++) {
       for (var c = 0; c < 8; c++) {
-        var sid = 'H_' + r + '_' + c;
+        var sid = 'H_' + c + '_' + r;  // H_{q}_{r}
         var s = owSectorData[sid];
         var cell = document.getElementById('ow-cell-' + r + '-' + c);
         var ctrlEl = document.getElementById('ow-ctrl-' + r + '-' + c);
@@ -1464,8 +1464,9 @@
     owResDashboard.innerHTML = '';
     var playerList = Array.isArray(players) ? players : Object.values(players);
     playerList.forEach(function(p) {
-      var name = p.name || p.id || '?';
-      var color = getPlayerColor(name);
+      var pid = p.player_id || p.id || '?';
+      var name = p.name || pid;
+      var color = getPlayerColor(pid);
       var card = document.createElement('div');
       card.className = 'ow-player-card';
       card.style.borderColor = color + '66';
@@ -1491,8 +1492,9 @@
     owLbBody.innerHTML = '';
     var rows = Array.isArray(data) ? data : (data.rankings || data.leaderboard || []);
     rows.forEach(function(entry, i) {
-      var name = entry.player || entry.name || '?';
-      var color = getPlayerColor(name);
+      var pid = entry.player_id || entry.player || '?';
+      var name = entry.name || pid;
+      var color = getPlayerColor(pid);
       var tr = document.createElement('tr');
       tr.innerHTML =
         '<td class="lb-rank">' + (entry.rank || (i + 1)) + '</td>' +
@@ -1534,16 +1536,70 @@
     return r.json();
   }
 
+  function transformWorldState(state) {
+    // Transform raw GameState JSON into the format updateOwMap/updateOwPlayers expect
+    var sectors = [];
+    var rawSectors = (state.world && state.world.sectors) || state.sectors || {};
+    var rawStructures = state.structures || {};
+
+    Object.keys(rawSectors).forEach(function(sid) {
+      var s = rawSectors[sid];
+      // Build structures list for this sector
+      var structs = [];
+      (s.structure_ids || []).forEach(function(stId) {
+        var st = rawStructures[stId];
+        if (st) {
+          structs.push({
+            id: st.structure_id,
+            type: st.structure_type,
+            owner: st.owner_player_id,
+            hp: st.hp,
+            max_hp: st.max_hp,
+            active: st.active,
+          });
+        }
+      });
+
+      sectors.push({
+        id: s.sector_id,
+        type: s.sector_type,
+        biome: s.biome,
+        controller: s.controller_player_id,
+        structures: structs,
+        resource_nodes: s.resource_nodes || [],
+      });
+    });
+
+    // Players — add sectors_controlled count
+    var players = [];
+    var rawPlayers = state.players || {};
+    Object.keys(rawPlayers).forEach(function(pid) {
+      var p = rawPlayers[pid];
+      if (!p.alive) return;
+      var controlled = sectors.filter(function(s) { return s.controller === pid; }).length;
+      players.push({
+        player_id: pid,
+        name: p.name || pid,
+        energy_reserve: p.energy_reserve,
+        metal: p.metal,
+        data: p.data,
+        biomass: p.biomass,
+        sectors_controlled: controlled,
+      });
+    });
+
+    return { sectors: sectors, players: players, heartbeat: state.heartbeat };
+  }
+
   async function refreshOwUI() {
     try {
       var state = await getWorldState();
-      if (state.map && state.map.sectors) {
-        updateOwMap(state.map.sectors);
-      } else if (state.sectors) {
-        updateOwMap(state.sectors);
-      }
-      if (state.players) {
-        updateOwPlayers(state.players);
+      var transformed = transformWorldState(state);
+      updateOwMap(transformed.sectors);
+      updateOwPlayers(transformed.players);
+      if (transformed.heartbeat != null) {
+        owHeartbeatNum = transformed.heartbeat;
+        hbCounter.textContent = 'HB ' + transformed.heartbeat;
       }
       var lb = await getLeaderboard();
       updateOwLeaderboard(lb);
@@ -1757,8 +1813,19 @@
     buildMapDOM();
   });
 
-  // Initial connection (match mode only)
-  connect();
+  // Initial setup
+  applyMode();
+  if (currentMode === 'openworld') {
+    // Auto-load existing world state
+    owWorldCreated = true;
+    refreshOwUI().then(function() {
+      setOwStatus('World loaded', '');
+    }).catch(function() {
+      setOwStatus('World ready — create or join', '');
+    });
+  } else {
+    connect();
+  }
   updateButtons();
 })();
 </script>
