@@ -4,4 +4,5 @@ __pycache__/
 saves/
 *.json
 !package.json
+!_meta.json
 .venv/
