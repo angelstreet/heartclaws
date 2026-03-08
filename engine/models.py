@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import GameConfig
-from .enums import ActionStatus, ActionType, DiplomaticStance, ResourceType, SectorType, StructureType
+from .enums import ActionStatus, ActionType, BiomeType, DiplomaticStance, ResourceType, SectorType, StructureType
 
 
 @dataclass
@@ -24,6 +24,7 @@ class SectorState:
     structure_ids: list[str] = field(default_factory=list)
     controller_player_id: str | None = None
     safe_owner_player_id: str | None = None
+    biome: BiomeType | None = None
 
 
 @dataclass

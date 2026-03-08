@@ -4,6 +4,18 @@ from enum import Enum
 class SectorType(Enum):
     SAFE = "SAFE"
     FRONTIER = "FRONTIER"
+    # Open world sector types
+    HAVEN = "HAVEN"
+    SETTLED = "SETTLED"
+    WASTELAND = "WASTELAND"
+
+
+class BiomeType(Enum):
+    IRONLANDS = "IRONLANDS"
+    DATAFIELDS = "DATAFIELDS"
+    GROVELANDS = "GROVELANDS"
+    BARRENS = "BARRENS"
+    NEXUS = "NEXUS"
 
 
 class ResourceType(Enum):
