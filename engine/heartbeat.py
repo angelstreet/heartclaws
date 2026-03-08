@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from .actions import get_action_energy_cost, resolve_action, validate_action
+from .config import EXTRACTOR_METAL_PER_HEARTBEAT
+from .conflict import resolve_attack_structure
+from .control import recompute_all_frontier_control
+from .energy import (
+    apply_upkeep_deactivations,
+    compute_player_available_energy,
+    compute_player_income,
+    compute_player_upkeep,
+    finalize_player_reserve,
+)
+from .enums import ActionStatus, ActionType, ResourceType, StructureType
+from .events import (
+    emit_action_failed,
+    emit_action_resolved,
+    emit_energy_computed,
+    emit_heartbeat_completed,
+    emit_heartbeat_started,
+)
+from .models import GameState, HeartbeatResult
+
+
+def run_heartbeat(state: GameState) -> HeartbeatResult:
+    # 1. Increment heartbeat
+    state.heartbeat += 1
+    events_start_idx = len(state.event_log)
+
+    # 2. Emit HEARTBEAT_STARTED
+    emit_heartbeat_started(state)
+
+    # 3. Collect pending actions submitted before this heartbeat
+    pending = [a for a in state.actions_pending if a.submitted_heartbeat < state.heartbeat]
+
+    # 4. Reset energy spent
+    for player in state.players.values():
+        player.energy_spent_this_heartbeat = 0
+
+    # 5. Upkeep deactivations
+    for pid in sorted(state.players):
+        apply_upkeep_deactivations(state, pid)
+
+    # 6. Emit ENERGY_COMPUTED per player
+    for pid in sorted(state.players):
+        player = state.players[pid]
+        income = compute_player_income(state, pid)
+        upkeep = compute_player_upkeep(state, pid)
+        available = compute_player_available_energy(state, pid)
+        emit_energy_computed(state, pid, income, upkeep, available, player.energy_reserve)
+
+    # 7. Passive resource production (extractors produce metal)
+    for pid in sorted(state.players):
+        player = state.players[pid]
+        for structure in state.structures.values():
+            if (
+                structure.owner_player_id == pid
+                and structure.active
+                and structure.structure_type == StructureType.EXTRACTOR
+            ):
+                sector = state.world.sectors.get(structure.sector_id)
+                if sector is None:
+                    continue
+                has_metal_node = any(
+                    node.resource_type == ResourceType.METAL and not node.depleted
+                    for node in sector.resource_nodes
+                )
+                if has_metal_node:
+                    player.metal += EXTRACTOR_METAL_PER_HEARTBEAT
+
+    # 8. Sort actions deterministically
+    pending.sort(key=lambda a: (-a.priority, a.submitted_heartbeat, a.issuer_player_id, a.action_id))
+
+    # 9. Resolve actions
+    for action in pending:
+        vr = validate_action(state, action)
+        if not vr.accepted:
+            action.status = ActionStatus.FAILED
+            action.failure_reason = vr.reason
+            emit_action_failed(state, action)
+        else:
+            if action.action_type == ActionType.ATTACK_STRUCTURE:
+                resolve_attack_structure(state, action)
+                action.energy_cost = get_action_energy_cost(action)
+                state.players[action.issuer_player_id].energy_spent_this_heartbeat += action.energy_cost
+            else:
+                resolve_action(state, action)
+            action.status = ActionStatus.RESOLVED
+            emit_action_resolved(state, action)
+
+    # 10. Recompute frontier control
+    recompute_all_frontier_control(state)
+
+    # 11. Finalize reserves
+    for pid in sorted(state.players):
+        finalize_player_reserve(state, pid)
+
+    # 12. Emit HEARTBEAT_COMPLETED
+    emit_heartbeat_completed(state)
+
+    # 13. Remove resolved/failed actions
+    resolved_or_failed = {a.action_id for a in pending}
+    state.actions_pending = [a for a in state.actions_pending if a.action_id not in resolved_or_failed]
+
+    # 14. Return result
+    heartbeat_events = state.event_log[events_start_idx:]
+    return HeartbeatResult(
+        heartbeat=state.heartbeat,
+        events=list(heartbeat_events),
+        state=state,
+    )

@@ -1,0 +1,47 @@
+from enum import Enum
+
+
+class SectorType(Enum):
+    SAFE = "SAFE"
+    FRONTIER = "FRONTIER"
+
+
+class ResourceType(Enum):
+    METAL = "METAL"
+    DATA = "DATA"
+    BIOMASS = "BIOMASS"
+
+
+class StructureType(Enum):
+    SANCTUARY_CORE = "SANCTUARY_CORE"
+    EXTRACTOR = "EXTRACTOR"
+    REACTOR = "REACTOR"
+    BATTERY = "BATTERY"
+    RELAY = "RELAY"
+    TOWER = "TOWER"
+    FACTORY = "FACTORY"
+    ATTACK_NODE = "ATTACK_NODE"
+
+
+class ActionType(Enum):
+    BUILD_STRUCTURE = "BUILD_STRUCTURE"
+    REMOVE_STRUCTURE = "REMOVE_STRUCTURE"
+    ATTACK_STRUCTURE = "ATTACK_STRUCTURE"
+    SCAN_SECTOR = "SCAN_SECTOR"
+    CREATE_SUBAGENT = "CREATE_SUBAGENT"
+    DEACTIVATE_SUBAGENT = "DEACTIVATE_SUBAGENT"
+    SET_POLICY = "SET_POLICY"
+    TRANSFER_RESOURCE = "TRANSFER_RESOURCE"
+
+
+class ActionStatus(Enum):
+    PENDING = "PENDING"
+    VALID = "VALID"
+    FAILED = "FAILED"
+    RESOLVED = "RESOLVED"
+
+
+class DiplomaticStance(Enum):
+    NEUTRAL = "NEUTRAL"
+    ALLY = "ALLY"
+    HOSTILE = "HOSTILE"

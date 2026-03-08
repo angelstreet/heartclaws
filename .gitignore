@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+saves/
+*.json
+!package.json
+.venv/
