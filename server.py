@@ -119,6 +119,7 @@ async def _report_scores_to_ranking(state: GameState) -> None:
                 "elo_before": elo_score,
                 "elo_after": elo_score,
                 "match_id": f"heartclaws-hb-{state.heartbeat}",
+                "session_name": "World",
             }
             try:
                 resp = await client.post(f"{RANKING_OF_CLAWS_API}/api/report/game", json=payload)
@@ -130,6 +131,64 @@ async def _report_scores_to_ranking(state: GameState) -> None:
                                    player.name, resp.status_code, resp.text[:200])
             except Exception as exc:
                 logger.warning("Ranking report error for %s: %s", player.name, exc)
+
+
+async def _report_match_to_ranking(
+    winner: str | None,
+    reason: str,
+    heartbeats: int,
+    state: GameState,
+    p1_info: dict,
+    p2_info: dict,
+    session_id: str,
+    session_name: str,
+) -> None:
+    """Report private match results to Ranking of Claws."""
+    try:
+        import httpx
+    except ImportError:
+        return
+
+    from engine.seasons import compute_player_score
+
+    players_info = [(P1, p1_info, P2, p2_info), (P2, p2_info, P1, p1_info)]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        for pid, info, opp_pid, opp_info in players_info:
+            gw = info.get("gateway_id")
+            if not gw:
+                continue
+
+            if winner is None:
+                result = "draw"
+            elif winner == pid:
+                result = "win"
+            else:
+                result = "loss"
+
+            # Compute score for ELO display
+            score = compute_player_score(state, pid)
+            elo = 1000 + round(score["composite"] * 10)
+
+            payload = {
+                "gateway_id": gw,
+                "agent_name": info.get("agent_name", info.get("strategy", "Unknown")),
+                "game": "heartclaws",
+                "result": result,
+                "opponent_gateway_id": opp_info.get("gateway_id"),
+                "opponent_name": opp_info.get("agent_name", opp_info.get("strategy", "Unknown")),
+                "elo_before": 1200,
+                "elo_after": elo,
+                "match_id": session_id,
+                "session_id": session_id,
+                "session_name": session_name,
+                "model": info.get("model"),
+            }
+            try:
+                await client.post(f"{RANKING_OF_CLAWS_API}/api/report/game", json=payload)
+                logger.info("Reported match %s for %s (%s) to RoC", session_id, info.get("agent_name"), result)
+            except Exception as exc:
+                logger.warning("Match report error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +585,7 @@ async def _run_sim(websocket: WebSocket):
         p2_name = msg.get("p2", "economist")
         seed = int(msg.get("seed", 42))
         speed_ms = int(msg.get("speed_ms", 1000))
+        max_heartbeats = int(msg.get("max_heartbeats", 200))
 
         # Resolve strategies
         try:
@@ -605,6 +665,41 @@ async def _run_sim(websocket: WebSocket):
                     total_structures_destroyed += 1
                 elif ev.event_type == "SECTOR_CONTROL_CHANGED":
                     total_control_changes += 1
+
+            # Check win conditions
+            eliminated = _check_elimination(runner.state)
+            dominator = _check_domination(runner.state)
+
+            if eliminated or dominator or hb >= max_heartbeats:
+                if eliminated:
+                    winner_id = P2 if eliminated == P1 else P1
+                    end_reason = "elimination"
+                elif dominator:
+                    winner_id = dominator
+                    end_reason = "domination"
+                else:
+                    winner_id = _check_timeout_winner(runner.state)
+                    end_reason = "timeout"
+
+                # Send match_end message
+                await websocket.send_json({
+                    "type": "match_end",
+                    "winner": winner_id,
+                    "reason": end_reason,
+                    "heartbeats": hb,
+                })
+
+                # Report to Ranking of Claws
+                p1_info = {"gateway_id": msg.get("p1_gateway_id"), "agent_name": msg.get("p1_agent_name", p1_name), "strategy": p1_name, "model": msg.get("p1_model")}
+                p2_info = {"gateway_id": msg.get("p2_gateway_id"), "agent_name": msg.get("p2_agent_name", p2_name), "strategy": p2_name, "model": msg.get("p2_model")}
+                session_name = msg.get("session_name", f"{p1_name} vs {p2_name}")
+                session_id = f"hc-match-{uuid.uuid4().hex[:12]}"
+
+                asyncio.create_task(_report_match_to_ranking(
+                    winner_id, end_reason, hb, runner.state,
+                    p1_info, p2_info, session_id, session_name
+                ))
+                break
 
             # Build payload
             payload = {
