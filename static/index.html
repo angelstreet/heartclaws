@@ -1021,6 +1021,8 @@
       console.log('WS closed');
       running = false;
       paused = false;
+      btnStart.disabled = false;
+      btnStart.textContent = 'Start Simulation';
       updateButtons();
     };
 
@@ -1075,6 +1077,8 @@
   function sendStart() {
     running = true;
     paused = false;
+    btnStart.disabled = true;
+    btnStart.textContent = 'Running...';
     updateButtons();
     ws.send(JSON.stringify({
       action: 'start',
@@ -1114,6 +1118,8 @@
     ws = null;
     running = false;
     paused = false;
+    btnStart.disabled = false;
+    btnStart.textContent = 'Start Simulation';
     updateButtons();
     eventLog.innerHTML = '';
     hbCounter.textContent = 'HB 0';

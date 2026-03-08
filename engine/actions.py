@@ -15,6 +15,12 @@ from .config import (
 from .control import recompute_sector_control
 from .energy import compute_player_available_energy
 from .enums import ActionStatus, ActionType, SectorType, StructureType
+from .events import (
+    emit_structure_attacked,
+    emit_structure_built,
+    emit_structure_destroyed,
+    emit_structure_removed,
+)
 from .models import (
     Action,
     GameState,
@@ -383,6 +389,7 @@ def _resolve_build(state, action, player, cost):
     )
     state.structures[st_id] = structure
     state.world.sectors[sector_id].structure_ids.append(st_id)
+    emit_structure_built(state, player.player_id, st_id, structure_type.value, sector_id)
     recompute_sector_control(state, sector_id)
 
 
@@ -396,6 +403,7 @@ def _resolve_remove(state, action, player, cost):
     refund = math.floor(structure.metal_cost * REMOVE_REFUND_RATIO)
     player.metal += refund
 
+    emit_structure_removed(state, player.player_id, structure_id)
     del state.structures[structure_id]
     state.world.sectors[sector_id].structure_ids.remove(structure_id)
     recompute_sector_control(state, sector_id)
@@ -408,8 +416,11 @@ def _resolve_attack(state, action, player, cost):
     target = state.structures[target_id]
     target.hp -= ATTACK_DAMAGE
 
+    emit_structure_attacked(state, player.player_id, target_id, ATTACK_DAMAGE, target.hp)
+
     if target.hp <= 0:
         sector_id = target.sector_id
+        emit_structure_destroyed(state, target.owner_player_id, target_id, sector_id)
         del state.structures[target_id]
         state.world.sectors[sector_id].structure_ids.remove(target_id)
         recompute_sector_control(state, sector_id)

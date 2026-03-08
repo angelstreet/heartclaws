@@ -188,12 +188,21 @@ def strategy_expansionist(state: GameState, player_id: str, rng: random.Random) 
     uncontrolled = [s for s in buildable if state.world.sectors[s].controller_player_id is None]
     controlled = [s for s in buildable if state.world.sectors[s].controller_player_id == player_id]
 
-    # Priority 1: expand with towers into uncontrolled sectors
+    # Check if we have any extractor — metal is the limiting resource
+    has_extractor = any(
+        st.owner_player_id == player_id
+        and st.structure_type == StructureType.EXTRACTOR
+        and st.active
+        for st in state.structures.values()
+    )
+
+    # Priority 1: expand with one tower first
     if uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER):
         sector_id = rng.choice(uncontrolled)
         actions.append(_make_build_action(state, player_id, sector_id, StructureType.TOWER))
-    # Priority 2: build extractors on metal nodes
-    elif controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
+
+    # Priority 2: build extractor on metal immediately after first tower
+    if not has_extractor and controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
         metal_sectors = [
             s for s in controlled
             if any(not n.depleted for n in state.world.sectors[s].resource_nodes)
@@ -205,8 +214,11 @@ def strategy_expansionist(state: GameState, player_id: str, rng: random.Random) 
         ]
         if metal_sectors:
             actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), StructureType.EXTRACTOR))
-        elif _can_afford_build(state, player_id, StructureType.REACTOR):
-            actions.append(_make_build_action(state, player_id, rng.choice(controlled), StructureType.REACTOR))
+
+    # Priority 3: build reactors if nothing else
+    if not actions and controlled and _can_afford_build(state, player_id, StructureType.REACTOR):
+        actions.append(_make_build_action(state, player_id, rng.choice(controlled), StructureType.REACTOR))
+
     return actions
 
 
@@ -221,14 +233,56 @@ def strategy_economist(state: GameState, player_id: str, rng: random.Random) -> 
     uncontrolled = [s for s in buildable if state.world.sectors[s].controller_player_id is None]
     controlled = [s for s in buildable if state.world.sectors[s].controller_player_id == player_id]
 
-    # Priority 1: grab one adjacent sector to get metal nodes
-    if uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER):
+    # Priority 1: must expand into frontier first (need frontier territory for economy)
+    if not controlled and uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER):
+        # Prefer metal-adjacent sectors, but take any if none have metal
+        metal_adj = [s for s in uncontrolled if any(not n.depleted for n in state.world.sectors[s].resource_nodes)]
+        target = rng.choice(metal_adj) if metal_adj else rng.choice(uncontrolled)
+        actions.append(_make_build_action(state, player_id, target, StructureType.TOWER))
+        return actions
+
+    # Priority 2: build extractor on metal nodes — metal is the limiting resource
+    has_extractor = any(
+        st.owner_player_id == player_id
+        and st.structure_type == StructureType.EXTRACTOR
+        and st.active
+        for st in state.structures.values()
+    )
+    if not has_extractor and controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
+        metal_sectors = [
+            s for s in controlled
+            if any(not n.depleted for n in state.world.sectors[s].resource_nodes)
+            and not any(
+                state.structures.get(st_id) is not None
+                and state.structures[st_id].structure_type == StructureType.EXTRACTOR
+                for st_id in state.world.sectors[s].structure_ids
+            )
+        ]
+        if metal_sectors:
+            actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), StructureType.EXTRACTOR))
+            return actions
+
+    # Priority 3: if no extractor yet and no metal in controlled sectors, expand to reach metal
+    if not has_extractor and uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER):
         metal_adj = [s for s in uncontrolled if any(not n.depleted for n in state.world.sectors[s].resource_nodes)]
         if metal_adj:
             actions.append(_make_build_action(state, player_id, rng.choice(metal_adj), StructureType.TOWER))
             return actions
+        # Even if no metal adjacent, keep expanding to reach metal eventually
+        actions.append(_make_build_action(state, player_id, rng.choice(uncontrolled), StructureType.TOWER))
+        return actions
 
-    # Priority 2: extractors on metal nodes
+    # Priority 4: reactors for energy (only after extractor is secured)
+    if controlled and _can_afford_build(state, player_id, StructureType.REACTOR):
+        reactor_count = sum(
+            1 for st in state.structures.values()
+            if st.owner_player_id == player_id and st.structure_type == StructureType.REACTOR and st.active
+        )
+        if reactor_count < 2:
+            actions.append(_make_build_action(state, player_id, rng.choice(controlled), StructureType.REACTOR))
+            return actions
+
+    # Priority 5: more extractors on any available metal
     if controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
         metal_sectors = [
             s for s in controlled
@@ -243,14 +297,16 @@ def strategy_economist(state: GameState, player_id: str, rng: random.Random) -> 
             actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), StructureType.EXTRACTOR))
             return actions
 
-    # Priority 3: reactors for energy
-    if controlled and _can_afford_build(state, player_id, StructureType.REACTOR):
-        actions.append(_make_build_action(state, player_id, rng.choice(controlled), StructureType.REACTOR))
-        return actions
-
-    # Priority 4: batteries for reserves
+    # Priority 6: batteries for reserves
     if controlled and _can_afford_build(state, player_id, StructureType.BATTERY):
         actions.append(_make_build_action(state, player_id, rng.choice(controlled), StructureType.BATTERY))
+        return actions
+
+    # Priority 7: expand more
+    if uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER):
+        metal_adj = [s for s in uncontrolled if any(not n.depleted for n in state.world.sectors[s].resource_nodes)]
+        target = rng.choice(metal_adj) if metal_adj else rng.choice(uncontrolled)
+        actions.append(_make_build_action(state, player_id, target, StructureType.TOWER))
 
     return actions
 
@@ -293,6 +349,27 @@ def strategy_aggressor(state: GameState, player_id: str, rng: random.Random) -> 
             actions.append(_make_build_action(state, player_id, rng.choice(adj_to_enemy), StructureType.ATTACK_NODE))
             return actions
 
+    # Build extractor early so aggressor doesn't run out of metal
+    has_extractor = any(
+        st.owner_player_id == player_id
+        and st.structure_type == StructureType.EXTRACTOR
+        and st.active
+        for st in state.structures.values()
+    )
+    if not has_extractor and controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
+        metal_sectors = [
+            s for s in controlled
+            if any(not n.depleted for n in state.world.sectors[s].resource_nodes)
+            and not any(
+                state.structures.get(st_id) is not None
+                and state.structures[st_id].structure_type == StructureType.EXTRACTOR
+                for st_id in state.world.sectors[s].structure_ids
+            )
+        ]
+        if metal_sectors:
+            actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), StructureType.EXTRACTOR))
+            return actions
+
     # Expand toward enemy with towers
     if uncontrolled and _can_afford_build(state, player_id, StructureType.TOWER):
         actions.append(_make_build_action(state, player_id, rng.choice(uncontrolled), StructureType.TOWER))
@@ -328,9 +405,29 @@ def strategy_turtle(state: GameState, player_id: str, rng: random.Random) -> lis
         actions.append(_make_build_action(state, player_id, rng.choice(uncontrolled), StructureType.TOWER))
         return actions
 
-    # Prioritize: extractor -> reactor -> battery -> relay -> tower (fortify controlled)
+    # Priority 2: extractor on metal first — metal is limiting resource
+    has_extractor = any(
+        st.owner_player_id == player_id
+        and st.structure_type == StructureType.EXTRACTOR
+        and st.active
+        for st in state.structures.values()
+    )
+    if not has_extractor and controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
+        metal_sectors = [
+            s for s in controlled
+            if any(not n.depleted for n in state.world.sectors[s].resource_nodes)
+            and not any(
+                state.structures.get(st_id) is not None
+                and state.structures[st_id].structure_type == StructureType.EXTRACTOR
+                for st_id in state.world.sectors[s].structure_ids
+            )
+        ]
+        if metal_sectors:
+            actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), StructureType.EXTRACTOR))
+            return actions
+
+    # Priority 3: reactor -> battery -> relay
     build_order = [
-        StructureType.EXTRACTOR,
         StructureType.REACTOR,
         StructureType.BATTERY,
         StructureType.RELAY,
@@ -338,21 +435,22 @@ def strategy_turtle(state: GameState, player_id: str, rng: random.Random) -> lis
 
     for stype in build_order:
         if controlled and _can_afford_build(state, player_id, stype):
-            if stype == StructureType.EXTRACTOR:
-                metal_sectors = [
-                    s for s in controlled
-                    if any(not n.depleted for n in state.world.sectors[s].resource_nodes)
-                    and not any(
-                        state.structures.get(st_id) is not None
-                        and state.structures[st_id].structure_type == StructureType.EXTRACTOR
-                        for st_id in state.world.sectors[s].structure_ids
-                    )
-                ]
-                if metal_sectors:
-                    actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), stype))
-                    return actions
-                continue
             actions.append(_make_build_action(state, player_id, rng.choice(controlled), stype))
+            return actions
+
+    # Priority 4: more extractors on remaining metal nodes
+    if controlled and _can_afford_build(state, player_id, StructureType.EXTRACTOR):
+        metal_sectors = [
+            s for s in controlled
+            if any(not n.depleted for n in state.world.sectors[s].resource_nodes)
+            and not any(
+                state.structures.get(st_id) is not None
+                and state.structures[st_id].structure_type == StructureType.EXTRACTOR
+                for st_id in state.world.sectors[s].structure_ids
+            )
+        ]
+        if metal_sectors:
+            actions.append(_make_build_action(state, player_id, rng.choice(metal_sectors), StructureType.EXTRACTOR))
             return actions
 
     # Slowly expand if nothing else to do

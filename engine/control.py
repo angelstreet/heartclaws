@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .enums import SectorType
+from .events import emit_sector_control_changed
 from .models import GameState
 
 
@@ -10,6 +11,8 @@ def recompute_sector_control(state: GameState, sector_id: str) -> None:
     sector = state.world.sectors[sector_id]
     if sector.sector_type == SectorType.SAFE:
         return
+
+    old_controller = sector.controller_player_id
 
     influence_by_player: dict[str, int] = defaultdict(int)
     for st_id in sector.structure_ids:
@@ -20,18 +23,18 @@ def recompute_sector_control(state: GameState, sector_id: str) -> None:
 
     if not influence_by_player:
         sector.controller_player_id = None
-        return
-
-    max_influence = max(influence_by_player.values())
-    if max_influence <= 0:
+    elif max(influence_by_player.values()) <= 0:
         sector.controller_player_id = None
-        return
-
-    leaders = [pid for pid, inf in influence_by_player.items() if inf == max_influence]
-    if len(leaders) == 1:
-        sector.controller_player_id = leaders[0]
     else:
-        sector.controller_player_id = None
+        max_influence = max(influence_by_player.values())
+        leaders = [pid for pid, inf in influence_by_player.items() if inf == max_influence]
+        if len(leaders) == 1:
+            sector.controller_player_id = leaders[0]
+        else:
+            sector.controller_player_id = None
+
+    if sector.controller_player_id != old_controller:
+        emit_sector_control_changed(state, sector_id, old_controller, sector.controller_player_id)
 
 
 def recompute_all_frontier_control(state: GameState) -> None:
