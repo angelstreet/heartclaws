@@ -238,11 +238,16 @@ class TestFrontend:
         assert r.status_code == 200
         assert "HeartClaws" in r.text
 
-    def test_index_has_openworld_mode(self, client):
+    def test_index_is_open_world(self, client):
         r = client.get("/")
-        assert "openworld" in r.text
         assert "Open World" in r.text
+        assert "player-dropdown" in r.text or "player-search" in r.text
 
     def test_index_has_hex_grid(self, client):
         r = client.get("/")
-        assert "hex" in r.text.lower() or "grid" in r.text.lower()
+        assert "grid" in r.text.lower()
+
+    def test_match_page_served(self, client):
+        r = client.get("/match")
+        assert r.status_code == 200
+        assert "Match" in r.text

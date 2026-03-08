@@ -214,6 +214,11 @@ def viewer():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/match")
+def match_page():
+    return FileResponse(STATIC_DIR / "match.html")
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # ---------------------------------------------------------------------------
