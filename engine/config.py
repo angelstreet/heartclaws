@@ -114,6 +114,30 @@ STRUCTURE_CATALOG: dict[StructureType, dict] = {
         "data_cost": 1,
         "biomass_cost": 0,
     },
+    StructureType.DATA_HARVESTER: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 25,
+        "influence": 1,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 1,
+        "metal_cost": 4,
+        "data_cost": 2,
+        "biomass_cost": 0,
+    },
+    StructureType.BIO_CULTIVATOR: {
+        "allowed_sector": SectorType.FRONTIER,
+        "hp": 25,
+        "influence": 1,
+        "energy_income_bonus": 0,
+        "reserve_cap_bonus": 0,
+        "throughput_cap_bonus": 0,
+        "upkeep": 1,
+        "metal_cost": 4,
+        "data_cost": 0,
+        "biomass_cost": 3,
+    },
 }
 
 BUILD_ENERGY_COSTS: dict[StructureType, int] = {
@@ -124,6 +148,8 @@ BUILD_ENERGY_COSTS: dict[StructureType, int] = {
     StructureType.TOWER: 4,
     StructureType.FACTORY: 7,
     StructureType.ATTACK_NODE: 6,
+    StructureType.DATA_HARVESTER: 4,
+    StructureType.BIO_CULTIVATOR: 4,
 }
 
 ACTION_ENERGY_COSTS: dict[ActionType, int] = {
@@ -141,4 +167,6 @@ SUBAGENT_DATA_COST: int = 2
 SUBAGENT_UPKEEP: int = 1
 ATTACK_DAMAGE: int = 10
 EXTRACTOR_METAL_PER_HEARTBEAT: int = 3
+DATA_HARVESTER_DATA_PER_HEARTBEAT: int = 3
+BIO_CULTIVATOR_BIOMASS_PER_HEARTBEAT: int = 3
 REMOVE_REFUND_RATIO: float = 0.5

@@ -14,7 +14,7 @@ from .config import (
 )
 from .control import recompute_sector_control
 from .energy import compute_player_available_energy
-from .enums import ActionStatus, ActionType, SectorType, StructureType
+from .enums import ActionStatus, ActionType, ResourceType, SectorType, StructureType
 from .events import (
     emit_structure_attacked,
     emit_structure_built,
@@ -154,6 +154,24 @@ def _validate_build(state, action, player):
     if player.biomass < catalog["biomass_cost"]:
         return ValidationResult(accepted=False, action_id=aid, reason="Not enough biomass")
 
+    # Resource node requirements for production structures
+    _STRUCTURE_REQUIRED_RESOURCE: dict[StructureType, ResourceType] = {
+        StructureType.EXTRACTOR: ResourceType.METAL,
+        StructureType.DATA_HARVESTER: ResourceType.DATA,
+        StructureType.BIO_CULTIVATOR: ResourceType.BIOMASS,
+    }
+    required_resource = _STRUCTURE_REQUIRED_RESOURCE.get(structure_type)
+    if required_resource is not None:
+        has_node = any(
+            node.resource_type == required_resource and not node.depleted
+            for node in sector.resource_nodes
+        )
+        if not has_node:
+            return ValidationResult(
+                accepted=False, action_id=aid,
+                reason=f"Sector has no {required_resource.value} resource node",
+            )
+
     return ValidationResult(accepted=True, action_id=aid)
 
 
@@ -191,8 +209,20 @@ def _validate_attack(state, action, player):
     if target_sector.sector_type == SectorType.SAFE:
         return ValidationResult(accepted=False, action_id=aid, reason="Cannot attack structures in safe zones")
 
-    if target_sector.sector_type != SectorType.FRONTIER:
-        return ValidationResult(accepted=False, action_id=aid, reason="Target sector is not FRONTIER")
+    # Open world spawn protection: HAVEN sectors have grace period
+    if target_sector.sector_type == SectorType.HAVEN and state.open_world:
+        # Find the player who spawned in this HAVEN
+        for p in state.players.values():
+            if p.sanctuary_sector_id == target_sector.sector_id:
+                if p.spawn_heartbeat + 10 > state.heartbeat:
+                    return ValidationResult(
+                        accepted=False, action_id=aid,
+                        reason="Target is in spawn protection",
+                    )
+                break
+
+    if target_sector.sector_type not in (SectorType.FRONTIER, SectorType.HAVEN, SectorType.SETTLED, SectorType.WASTELAND):
+        return ValidationResult(accepted=False, action_id=aid, reason="Target sector is not attackable")
 
     if target.owner_player_id == player.player_id:
         return ValidationResult(accepted=False, action_id=aid, reason="Cannot attack own structure")

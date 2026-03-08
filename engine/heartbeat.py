@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from .actions import get_action_energy_cost, resolve_action, validate_action
-from .config import EXTRACTOR_METAL_PER_HEARTBEAT
+from .config import (
+    BIO_CULTIVATOR_BIOMASS_PER_HEARTBEAT,
+    DATA_HARVESTER_DATA_PER_HEARTBEAT,
+    EXTRACTOR_METAL_PER_HEARTBEAT,
+)
 from .conflict import resolve_attack_structure
 from .control import recompute_all_frontier_control
 from .energy import (
@@ -49,24 +53,39 @@ def run_heartbeat(state: GameState) -> HeartbeatResult:
         available = compute_player_available_energy(state, pid)
         emit_energy_computed(state, pid, income, upkeep, available, player.energy_reserve)
 
-    # 7. Passive resource production (extractors produce metal)
+    # 7. Passive resource production (extractors, data harvesters, bio cultivators)
     for pid in sorted(state.players):
         player = state.players[pid]
         for structure in state.structures.values():
-            if (
-                structure.owner_player_id == pid
-                and structure.active
-                and structure.structure_type == StructureType.EXTRACTOR
-            ):
-                sector = state.world.sectors.get(structure.sector_id)
-                if sector is None:
-                    continue
+            if structure.owner_player_id != pid or not structure.active:
+                continue
+            sector = state.world.sectors.get(structure.sector_id)
+            if sector is None:
+                continue
+
+            if structure.structure_type == StructureType.EXTRACTOR:
                 has_metal_node = any(
                     node.resource_type == ResourceType.METAL and not node.depleted
                     for node in sector.resource_nodes
                 )
                 if has_metal_node:
                     player.metal += EXTRACTOR_METAL_PER_HEARTBEAT
+
+            elif structure.structure_type == StructureType.DATA_HARVESTER:
+                has_data_node = any(
+                    node.resource_type == ResourceType.DATA and not node.depleted
+                    for node in sector.resource_nodes
+                )
+                if has_data_node:
+                    player.data += DATA_HARVESTER_DATA_PER_HEARTBEAT
+
+            elif structure.structure_type == StructureType.BIO_CULTIVATOR:
+                has_biomass_node = any(
+                    node.resource_type == ResourceType.BIOMASS and not node.depleted
+                    for node in sector.resource_nodes
+                )
+                if has_biomass_node:
+                    player.biomass += BIO_CULTIVATOR_BIOMASS_PER_HEARTBEAT
 
     # 8. Sort actions deterministically
     pending.sort(key=lambda a: (-a.priority, a.submitted_heartbeat, a.issuer_player_id, a.action_id))

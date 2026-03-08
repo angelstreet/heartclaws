@@ -33,6 +33,8 @@ class StructureType(Enum):
     TOWER = "TOWER"
     FACTORY = "FACTORY"
     ATTACK_NODE = "ATTACK_NODE"
+    DATA_HARVESTER = "DATA_HARVESTER"
+    BIO_CULTIVATOR = "BIO_CULTIVATOR"
 
 
 class ActionType(Enum):
