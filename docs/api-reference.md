@@ -1,9 +1,9 @@
 # API Reference
 
-FastAPI server exposing the HeartClaws engine over HTTP. Default port: **5013**.
+FastAPI server exposing the HeartClaws engine over HTTP. Default port: **5020**.
 
 ```bash
-uvicorn server:app --port 5013
+uvicorn server:app --host 0.0.0.0 --port 5020
 ```
 
 All game state is held in memory. Use save/load endpoints for persistence.
@@ -139,6 +139,61 @@ Load a saved game. Body: `{"path": "saves/game_42.json"}`.
 
 ---
 
+## WebSocket: /ws/sim (alias: /ws/match)
+
+Live simulation streaming. Used by the web viewer.
+
+**Connect:** `ws://localhost:5020/ws/sim`
+
+**Start simulation:**
+```json
+{"action": "start", "p1": "expansionist", "p2": "aggressor", "speed_ms": 1000, "seed": 42}
+```
+
+Available strategies: `random`, `expansionist`, `economist`, `aggressor`, `turtle`
+
+**Control messages:**
+```json
+{"action": "pause"}
+{"action": "resume"}
+{"action": "step"}
+{"action": "speed", "speed_ms": 500}
+```
+
+**Server sends per heartbeat:**
+```json
+{
+  "type": "heartbeat",
+  "data": {
+    "heartbeat": 1,
+    "map": {"sectors": [...]},
+    "players": {"p1": {...}, "p2": {...}},
+    "events": [...],
+    "stats": {"total_heartbeats": 1, "structures_built": 2, "structures_destroyed": 0, "control_changes": 1}
+  }
+}
+```
+
+---
+
+## Event Types
+
+| Event | Fired When |
+|-------|-----------|
+| HEARTBEAT_STARTED | Turn begins |
+| HEARTBEAT_COMPLETED | Turn ends |
+| ENERGY_COMPUTED | Energy calculated for a player |
+| ACTION_RESOLVED | Action successfully executed |
+| ACTION_FAILED | Action validation failed |
+| STRUCTURE_BUILT | Structure placed on map |
+| STRUCTURE_ATTACKED | Structure took damage |
+| STRUCTURE_DESTROYED | Structure reached 0 HP |
+| STRUCTURE_REMOVED | Player removed own structure |
+| SECTOR_CONTROL_CHANGED | Sector controller changed |
+| UPKEEP_DEACTIVATION | Structure deactivated (can't pay upkeep) |
+
+---
+
 ## Action Payload Reference
 
 | Action Type | Required Payload Fields |
@@ -156,39 +211,39 @@ Load a saved game. Body: `{"path": "saves/game_42.json"}`.
 
 ```bash
 # Turn 0: Create game
-GAME=$(curl -s -X POST http://localhost:5013/games \
+GAME=$(curl -s -X POST http://localhost:5020/games \
   -H "Content-Type: application/json" \
   -d '{"players": ["p1", "p2"], "seed": 42}' | jq -r '.game_id')
 
 # Turn 0: p1 builds an extractor on F1
-curl -s -X POST http://localhost:5013/games/$GAME/actions \
+curl -s -X POST http://localhost:5020/games/$GAME/actions \
   -H "Content-Type: application/json" \
   -d '{"player_id": "p1", "action_type": "BUILD_STRUCTURE", "payload": {"sector_id": "F1", "structure_type": "EXTRACTOR"}}'
 
 # Turn 0: p2 builds a tower on F9
-curl -s -X POST http://localhost:5013/games/$GAME/actions \
+curl -s -X POST http://localhost:5020/games/$GAME/actions \
   -H "Content-Type: application/json" \
   -d '{"player_id": "p2", "action_type": "BUILD_STRUCTURE", "payload": {"sector_id": "F9", "structure_type": "TOWER"}}'
 
 # Resolve turn 0 -> heartbeat 1
-curl -s -X POST http://localhost:5013/games/$GAME/heartbeat | jq .
+curl -s -X POST http://localhost:5020/games/$GAME/heartbeat | jq .
 
 # Turn 1: p1 builds a reactor on F4
-curl -s -X POST http://localhost:5013/games/$GAME/actions \
+curl -s -X POST http://localhost:5020/games/$GAME/actions \
   -H "Content-Type: application/json" \
   -d '{"player_id": "p1", "action_type": "BUILD_STRUCTURE", "payload": {"sector_id": "F4", "structure_type": "REACTOR"}}'
 
 # Turn 1: p2 scans F5
-curl -s -X POST http://localhost:5013/games/$GAME/actions \
+curl -s -X POST http://localhost:5020/games/$GAME/actions \
   -H "Content-Type: application/json" \
   -d '{"player_id": "p2", "action_type": "SCAN_SECTOR", "payload": {"sector_id": "F5"}}'
 
 # Resolve turn 1 -> heartbeat 2
-curl -s -X POST http://localhost:5013/games/$GAME/heartbeat | jq .
+curl -s -X POST http://localhost:5020/games/$GAME/heartbeat | jq .
 
 # Check p1's state after 2 turns
-curl -s http://localhost:5013/games/$GAME/player/p1 | jq .
+curl -s http://localhost:5020/games/$GAME/player/p1 | jq .
 
 # View map
-curl -s http://localhost:5013/games/$GAME/map | jq .
+curl -s http://localhost:5020/games/$GAME/map | jq .
 ```
