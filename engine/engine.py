@@ -86,15 +86,40 @@ def get_player_view(state: GameState, player_id: str) -> dict:
         if sector.controller_player_id == player_id
     ]
 
-    # Include resource node info for controlled sectors so agents know where to build
+    # Include resource node info for controlled sectors + adjacent uncontrolled sectors
     sector_details = {}
+    adjacent_uncontrolled: set[str] = set()
     for sid in controlled_sectors:
         sector = state.world.sectors[sid]
         nodes = [
             {"type": n.resource_type.value, "richness": n.richness, "depleted": n.depleted}
             for n in sector.resource_nodes
         ]
-        sector_details[sid] = {"resource_nodes": nodes}
+        adj_ids = [a for a in sector.adjacent_sector_ids if a in state.world.sectors]
+        sector_details[sid] = {
+            "resource_nodes": nodes,
+            "adjacent_sectors": adj_ids,
+            "sector_type": sector.sector_type.value,
+        }
+        for adj_id in adj_ids:
+            adj_sector = state.world.sectors[adj_id]
+            if adj_sector.controller_player_id != player_id:
+                adjacent_uncontrolled.add(adj_id)
+
+    # Expose adjacent uncontrolled sectors so agents can build TOWERs to expand
+    for sid in adjacent_uncontrolled:
+        sector = state.world.sectors[sid]
+        nodes = [
+            {"type": n.resource_type.value, "richness": n.richness, "depleted": n.depleted}
+            for n in sector.resource_nodes
+        ]
+        controller = sector.controller_player_id or "uncontrolled"
+        sector_details[sid] = {
+            "resource_nodes": nodes,
+            "sector_type": sector.sector_type.value,
+            "controller": controller,
+            "can_build_tower": controller == "uncontrolled",
+        }
 
     visible_structures = {
         st_id: {

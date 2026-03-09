@@ -108,6 +108,12 @@ MODELS: dict[str, ModelConfig] = {
         provider="mistral",
         api_key_env="CODESTRAL_API_KEY",
     ),
+    "mistral-small": ModelConfig(
+        name="Mistral Small",
+        model_id="mistralai/mistral-small-3.1-24b-instruct",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
     # --- Other paid models (add via --models) ---
     "gpt4o": ModelConfig(
         name="GPT-4o",
@@ -145,45 +151,46 @@ MODELS: dict[str, ModelConfig] = {
 # LLM call abstraction
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a hex-grid strategy game (8x8 grid, coordinates H_0_0 to H_7_7). Respond with a JSON array of 1-5 actions. No explanation, just JSON.
+SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a hex-grid strategy game. Respond ONLY with a JSON array of 1-5 actions. No explanation, just valid JSON.
 
 Format: [{"action_type": "...", "payload": {...}}, ...]
 
-ACTIONS & PAYLOADS:
+ACTIONS:
 - BUILD_STRUCTURE: {"sector_id": "H_x_y", "structure_type": "TYPE"}
-  Types (cost = Energy + Metal + Data + Biomass):
-  EXTRACTOR (4E+6M, mine METAL — sector MUST have METAL resource node, +3 metal/turn)
-  DATA_HARVESTER (4E+4M+2D, mine DATA — needs DATA node, +3 data/turn)
-  BIO_CULTIVATOR (4E+4M+3B, mine BIOMASS — needs BIOMASS node, +3 biomass/turn)
-  TOWER (4E+5M, expand territory to adjacent sector, +3 influence)
-  REACTOR (8E+10M, +8 energy income/turn)
-  ATTACK_NODE (6E+9M+1D, required before attacking)
-  SHIELD_GENERATOR (6E+8M+5B, defense)
-  TRADE_HUB (7E+10M+3D, trade bonus)
-  OUTPOST (10E+15M+2D, strong influence+energy)
-  You start with 20 metal, 5 data, 0 biomass. Check your resources before building!
-- ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"} — need ATTACK_NODE in target/adjacent sector, cannot attack allies or spawn-protected players (first 10 heartbeats)
+- ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"}
 - SET_POLICY: {"target_player_id": "pN", "stance": "ALLY|NEUTRAL|HOSTILE"}
 - TRANSFER_RESOURCE: {"target_player_id": "pN", "resource_type": "METAL|DATA|BIOMASS", "amount": N}
-- SCAN_SECTOR: {"sector_id": "H_x_y"} — reveals sector info, ONLY works on sectors you control or adjacent to ones you control
-- REMOVE_STRUCTURE: {"structure_id": "st_xxx"} — remove your own structure
+- SCAN_SECTOR: {"sector_id": "H_x_y"}
+- REMOVE_STRUCTURE: {"structure_id": "st_xxx"}
+
+STRUCTURE TYPES (energy_cost + metal + data + biomass):
+- EXTRACTOR: 4E+6M — requires METAL resource node in sector → +3 metal/turn
+- DATA_HARVESTER: 4E+4M+2D — requires DATA node → +3 data/turn
+- BIO_CULTIVATOR: 4E+4M+3B — requires BIOMASS node → +3 biomass/turn
+- TOWER: 4E+5M — no resource node required → claims uncontrolled sector
+- REACTOR: 8E+10M — no resource node required → +8 energy/turn
+- ATTACK_NODE: 6E+9M+1D | SHIELD_GENERATOR: 6E+8M+5B | TRADE_HUB: 7E+10M+3D | OUTPOST: 10E+15M+2D
 
 BUILD RULES:
-- EXTRACTOR requires a METAL resource node in the sector (check resource_nodes array)
-- DATA_HARVESTER requires a DATA node, BIO_CULTIVATOR requires a BIOMASS node
-- You can only build in sectors you control OR uncontrolled sectors adjacent to one you control
-- Building a TOWER in an uncontrolled sector claims it for you
-- Each structure costs resources (metal/data/biomass) — check you have enough
+- Your game state includes "sector_details" — this shows ALL sectors you can build in (your controlled ones + adjacent uncontrolled ones) WITH their resource_nodes.
+- Build EXTRACTOR in a sector with resource_nodes containing type="METAL"
+- Build DATA_HARVESTER in a sector with resource_nodes containing type="DATA"
+- Build BIO_CULTIVATOR in a sector with resource_nodes containing type="BIOMASS"
+- Build TOWER in any sector where can_build_tower=true (adjacent, uncontrolled)
+- You can build multiple structures per turn if you have resources
 
-STRATEGY PRIORITIES (follow this order every turn):
-1. BUILD first — always prioritize building over scanning. Build EXTRACTOR/DATA_HARVESTER/BIO_CULTIVATOR on sectors that have matching resource nodes. Build TOWERs on adjacent uncontrolled sectors to expand.
-2. SCAN sparingly — only scan 1 unknown adjacent sector per turn, and only if you have spare actions. Never submit more than 1 SCAN per turn.
-3. Build REACTOR if your energy income is low or negative.
-4. SET_POLICY stance=ALLY with nearby players early.
-5. Build ATTACK_NODE only when you have 3+ structures and want to attack.
-6. DO NOT repeat failed actions. If a SCAN or BUILD was rejected, try a different sector or action.
+HOW TO PLAY (strictly follow this each turn):
+STEP 1: Look at sector_details. For each sector in it:
+  - If it has resource_nodes and you control it → BUILD matching extractor/harvester/cultivator
+  - If can_build_tower=true → BUILD TOWER to expand territory
+STEP 2: If you have spare resources, build REACTOR in your home sector (needs 10M)
+STEP 3: Only SCAN if sector_details is empty — NEVER scan sectors already in sector_details
 
-IMPORTANT: Your home sector (where you spawned) likely has a resource node — build an extractor there on turn 1!
+CRITICAL RULES:
+- NEVER submit SCAN for a sector already listed in sector_details — you already have that info
+- NEVER submit BUILD_STRUCTURE for a structure type that doesn't match the sector's resource_nodes
+- Check "affordable_structures" to verify you can afford what you want to build
+- If last turn had rejected actions, avoid repeating those mistakes
 
 Respond ONLY with a valid JSON array."""
 
@@ -324,6 +331,9 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
                 timeout=30,
             )
             data = resp.json()
+            if resp.status_code >= 400:
+                log.warning("Mistral API error %d for %s: %s", resp.status_code, model.model_id, data)
+                return []
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
 
         else:
@@ -519,7 +529,13 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         })
         if result and result.get("accepted"):
             agent.actions_submitted += 1
-            accepted.append(action_type)
+            # Include key payload fields for readability
+            detail = ""
+            if action_type == "BUILD_STRUCTURE":
+                detail = f"[{payload.get('sector_id','?')} {payload.get('structure_type','?')}]"
+            elif action_type == "SCAN_SECTOR":
+                detail = f"[{payload.get('sector_id','?')}]"
+            accepted.append(f"{action_type}{detail}")
         else:
             agent.actions_failed += 1
             reason = result.get("reason", "?") if result else "no response"
@@ -613,6 +629,22 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
             hb = await hc_post(client, f"/games/{game_id}/heartbeat", {})
             hb_num = hb.get("heartbeat", "?") if hb else "?"
 
+            # Parse ACTION_FAILED events from heartbeat — these are validation failures
+            # that happen at resolution time (not caught at submission)
+            hb_events = hb.get("events", []) if hb else []
+            for ev in hb_events:
+                if ev.get("event_type") == "ACTION_FAILED":
+                    pid = ev.get("actor_player_id")
+                    details = ev.get("details", {})
+                    atype = details.get("action_type", "?")
+                    reason = details.get("failure_reason", "?")
+                    msg = f"{atype}: {reason}"
+                    for a in agents:
+                        if a.player_id == pid:
+                            a.actions_failed += 1
+                            a.last_rejections.append(msg)
+                            a.all_errors.append(f"[HB] {msg}")
+
             elapsed = time.time() - t0
 
             # Progress log every 10 turns
@@ -699,23 +731,11 @@ def _resolve_model(key: str) -> tuple[str, ModelConfig]:
     return key, None
 
 
-def _resolve_model(key: str) -> tuple[str, ModelConfig]:
-    """Resolve a model key or OpenRouter model ID (e.g. 'meta-llama/llama-4-scout:free')."""
-    if key in MODELS:
-        return key, MODELS[key]
-    # Treat as an OpenRouter model ID (provider/model-name format)
-    if "/" in key:
-        name = key.split("/")[-1].split(":")[0].replace("-", " ").title()
-        model = ModelConfig(name=name, model_id=key, provider="openrouter", api_key_env="OPENROUTER_API_KEY")
-        return key, model
-    return key, None
-
-
 def main():
     parser = argparse.ArgumentParser(description="HeartClaws AI Benchmark")
     parser.add_argument("--turns", type=int, default=100, help="Number of heartbeats to play")
     parser.add_argument(
-        "--models", type=str, default="minimax-m25hs,codestral",
+        "--models", type=str, default="codestral,mistral-small",
         help=f"Comma-separated model keys or OpenRouter IDs (e.g. meta-llama/llama-4-scout:free). "
              f"Presets: {','.join(MODELS.keys())}",
     )
