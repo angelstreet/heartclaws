@@ -562,21 +562,44 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         "POLICY": "SET_POLICY",
     }
 
-    # Submit each action
+    # Submit each action — track running resource consumption so multi-action turns
+    # don't submit more than the player can afford across the whole batch.
+    ENERGY_COSTS = {
+        "EXTRACTOR": 4, "DATA_HARVESTER": 4, "BIO_CULTIVATOR": 4,
+        "TOWER": 4, "REACTOR": 8, "ATTACK_NODE": 6,
+        "SHIELD_GENERATOR": 6, "TRADE_HUB": 7, "OUTPOST": 10,
+    }
+    ACTION_ENERGY = {"SCAN_SECTOR": 2, "SET_POLICY": 1, "TRANSFER_RESOURCE": 1, "ATTACK_STRUCTURE": 3}
+    spent_m, spent_d, spent_b, spent_e = 0, 0, 0, 0  # running totals this turn
+
     accepted = []
     rejected = []
     for action in actions[:5]:  # Max 5 per heartbeat
         action_type = ACTION_ALIASES.get(action.get("action_type", ""), action.get("action_type", ""))
         payload = action.get("payload", {})
 
-        # Client-side pre-filter: block BUILD_STRUCTURE for types not in affordable list
+        # Client-side pre-filter: block BUILD_STRUCTURE using remaining (not yet spent) resources
         if action_type == "BUILD_STRUCTURE":
             stype = payload.get("structure_type", "")
-            if stype and stype not in affordable:
-                msg = f"BUILD_STRUCTURE {stype}: not affordable (metal={metal} data={data} biomass={biomass} energy={energy_reserve})"
-                agent.last_rejections.append(msg)
-                agent.all_errors.append(f"[PRE] {msg}")
-                continue
+            if stype:
+                m, d, b, e = next(
+                    ((mv, dv, bv, ev) for s, (mv, dv, bv, ev) in COSTS.items() if s == stype),
+                    (999, 999, 999, 999),
+                )
+                rem_m, rem_d, rem_b, rem_e = metal - spent_m, data - spent_d, biomass - spent_b, energy_reserve - spent_e
+                if rem_m < m or rem_d < d or rem_b < b or rem_e < e:
+                    msg = f"BUILD_STRUCTURE {stype}: not affordable (need {m}M/{e}E have {rem_m}M/{rem_e}E)"
+                    agent.last_rejections.append(msg)
+                    agent.all_errors.append(f"[PRE] {msg}")
+                    continue
+                spent_m += m; spent_d += d; spent_b += b; spent_e += e
+
+        # Block other actions when energy would be exhausted
+        elif action_type in ACTION_ENERGY:
+            cost_e = ACTION_ENERGY[action_type]
+            if energy_reserve - spent_e < cost_e:
+                continue  # silently skip — no energy, no point logging
+            spent_e += cost_e
         result = await hc_post(client, f"/games/{game_id}/actions", {
             "player_id": agent.player_id,
             "action_type": action_type,
