@@ -115,9 +115,9 @@ MODELS: dict[str, ModelConfig] = {
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
-    "nemotron": ModelConfig(
-        name="Nemotron Nano 30B",
-        model_id="nvidia/nemotron-3-nano-30b-a3b:free",
+    "llama": ModelConfig(
+        name="Llama 3.3 70B",
+        model_id="meta-llama/llama-3.3-70b-instruct:free",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
@@ -379,6 +379,13 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
                 return json.loads(match.group())
             except json.JSONDecodeError:
                 pass
+        # Model returned a single object instead of array — wrap it
+        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        if match:
+            try:
+                return [json.loads(match.group())]
+            except json.JSONDecodeError:
+                pass
         log.warning("%s returned unparseable response: %s", model.name, text[:120])
         return []
 
@@ -467,9 +474,28 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         agent.all_errors.append("GET player state failed")
         return
 
+    # Compute what the player can afford this turn
+    player = state.get("player", {})
+    metal = player.get("metal", 0)
+    data = player.get("data", 0)
+    biomass = player.get("biomass", 0)
+    energy = state.get("energy", {})
+    income = state.get("income", 0)
+    upkeep = state.get("upkeep", 0)
+    net_energy = income - upkeep
+    COSTS = {
+        "EXTRACTOR": (6, 0, 0), "DATA_HARVESTER": (4, 2, 0), "BIO_CULTIVATOR": (4, 0, 3),
+        "TOWER": (5, 0, 0), "REACTOR": (10, 0, 0), "ATTACK_NODE": (9, 1, 0),
+        "SHIELD_GENERATOR": (8, 0, 5), "TRADE_HUB": (10, 3, 0), "OUTPOST": (15, 2, 0),
+    }
+    affordable = [s for s, (m, d, b) in COSTS.items() if metal >= m and data >= d and biomass >= b]
+
     # Trim state to reduce tokens — send only what matters
     compact_state = {
-        "player": state.get("player"),
+        "player": player,
+        "resources": {"metal": metal, "data": data, "biomass": biomass},
+        "energy": {"net_per_turn": net_energy, "income": income, "upkeep": upkeep},
+        "affordable_structures": affordable,
         "controlled_sectors": state.get("controlled_sectors"),
         "sector_details": state.get("sector_details", {}),
         "structures": state.get("structures"),
@@ -485,7 +511,11 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     agent.last_rejections = []
 
     # Ask LLM for actions
+    t_llm = time.time()
     actions = await call_llm(client, agent.model, state_json)
+    llm_ms = int((time.time() - t_llm) * 1000)
+    if llm_ms > 30000:
+        log.warning("%s LLM call took %dms", agent.model.name, llm_ms)
 
     if not actions:
         log.debug("%s (%s): no actions returned", agent.model.name, agent.player_id)
@@ -698,7 +728,7 @@ def main():
     parser = argparse.ArgumentParser(description="HeartClaws AI Benchmark")
     parser.add_argument("--turns", type=int, default=100, help="Number of heartbeats to play")
     parser.add_argument(
-        "--models", type=str, default=",".join(MODELS.keys()),
+        "--models", type=str, default="minimax-01,trinity,codestral,grok",
         help=f"Comma-separated model keys or OpenRouter IDs (e.g. meta-llama/llama-4-scout:free). "
              f"Presets: {','.join(MODELS.keys())}",
     )
