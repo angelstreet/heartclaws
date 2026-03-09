@@ -180,17 +180,20 @@ BUILD RULES:
 - You can build multiple structures per turn if you have resources
 
 HOW TO PLAY (strictly follow this each turn):
-STEP 1: Look at sector_details. For each sector in it:
-  - If it has resource_nodes and you control it → BUILD matching extractor/harvester/cultivator
-  - If can_build_tower=true → BUILD TOWER to expand territory
-STEP 2: If you have spare resources, build REACTOR in your home sector (needs 10M)
-STEP 3: Only SCAN if sector_details is empty — NEVER scan sectors already in sector_details
+STEP 0: Check "can_act". If can_act=false, your energy reserve is 0 — respond with [] (empty array) and wait for energy to regenerate next turn. Do NOT submit any actions.
+STEP 1: Check "affordable_structures" — this is the ONLY list of things you can build right now (accounts for metal, data, biomass AND energy). If it's empty but can_act=true, submit SCAN on an adjacent unknown sector. Only use SET_POLICY if "opponents" list is non-empty.
+STEP 2: Look at sector_details. For each sector listed:
+  - If it has a METAL resource_node and you control it → BUILD EXTRACTOR (if EXTRACTOR is in affordable_structures)
+  - If it has a DATA node → BUILD DATA_HARVESTER (if affordable)
+  - If it has a BIOMASS node → BUILD BIO_CULTIVATOR (if affordable)
+  - If can_build_tower=true → BUILD TOWER to expand territory (if TOWER is affordable)
+STEP 3: Only SCAN if sector_details has no adjacent sectors — NEVER scan sectors already listed
 
 CRITICAL RULES:
-- NEVER submit SCAN for a sector already listed in sector_details — you already have that info
-- NEVER submit BUILD_STRUCTURE for a structure type that doesn't match the sector's resource_nodes
-- Check "affordable_structures" to verify you can afford what you want to build
-- If last turn had rejected actions, avoid repeating those mistakes
+- ONLY build structures that appear in "affordable_structures" — building anything else will always fail
+- NEVER try to build the same structure twice in the same sector (one per sector)
+- NEVER scan sectors already in sector_details
+- If last turn had rejected actions, avoid repeating those exact actions
 
 Respond ONLY with a valid JSON array."""
 
@@ -494,19 +497,36 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     income = state.get("income", 0)
     upkeep = state.get("upkeep", 0)
     net_energy = income - upkeep
+    energy_reserve = player.get("energy_reserve", 0)
+    # COSTS: (metal, data, biomass, energy) — must check ALL four
     COSTS = {
-        "EXTRACTOR": (6, 0, 0), "DATA_HARVESTER": (4, 2, 0), "BIO_CULTIVATOR": (4, 0, 3),
-        "TOWER": (5, 0, 0), "REACTOR": (10, 0, 0), "ATTACK_NODE": (9, 1, 0),
-        "SHIELD_GENERATOR": (8, 0, 5), "TRADE_HUB": (10, 3, 0), "OUTPOST": (15, 2, 0),
+        "EXTRACTOR":        (6, 0, 0, 4),
+        "DATA_HARVESTER":   (4, 2, 0, 4),
+        "BIO_CULTIVATOR":   (4, 0, 3, 4),
+        "TOWER":            (5, 0, 0, 4),
+        "REACTOR":          (10, 0, 0, 8),
+        "ATTACK_NODE":      (9, 1, 0, 6),
+        "SHIELD_GENERATOR": (8, 0, 5, 6),
+        "TRADE_HUB":        (10, 3, 0, 7),
+        "OUTPOST":          (15, 2, 0, 10),
     }
-    affordable = [s for s, (m, d, b) in COSTS.items() if metal >= m and data >= d and biomass >= b]
+    affordable = [
+        s for s, (m, d, b, e) in COSTS.items()
+        if metal >= m and data >= d and biomass >= b and energy_reserve >= e
+    ]
 
     # Trim state to reduce tokens — send only what matters
     compact_state = {
         "player": player,
         "resources": {"metal": metal, "data": data, "biomass": biomass},
-        "energy": {"net_per_turn": net_energy, "income": income, "upkeep": upkeep},
-        "affordable_structures": affordable,
+        "energy": {"reserve": energy_reserve, "net_per_turn": net_energy, "income": income, "upkeep": upkeep},
+        "affordable_structures": affordable,  # empty = cannot build anything this turn
+        "can_act": energy_reserve >= 1,       # False = submit [] and wait for energy to regenerate
+        "opponents": [                         # other players visible in this game
+            {"player_id": st["owner_player_id"], "sector_id": st["sector_id"]}
+            for st in (state.get("structures") or {}).values()
+            if st["owner_player_id"] != agent.player_id and st["structure_type"] == "SANCTUARY_CORE"
+        ],
         "controlled_sectors": state.get("controlled_sectors"),
         "sector_details": state.get("sector_details", {}),
         "structures": state.get("structures"),
@@ -548,6 +568,15 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     for action in actions[:5]:  # Max 5 per heartbeat
         action_type = ACTION_ALIASES.get(action.get("action_type", ""), action.get("action_type", ""))
         payload = action.get("payload", {})
+
+        # Client-side pre-filter: block BUILD_STRUCTURE for types not in affordable list
+        if action_type == "BUILD_STRUCTURE":
+            stype = payload.get("structure_type", "")
+            if stype and stype not in affordable:
+                msg = f"BUILD_STRUCTURE {stype}: not affordable (metal={metal} data={data} biomass={biomass} energy={energy_reserve})"
+                agent.last_rejections.append(msg)
+                agent.all_errors.append(f"[PRE] {msg}")
+                continue
         result = await hc_post(client, f"/games/{game_id}/actions", {
             "player_id": agent.player_id,
             "action_type": action_type,
