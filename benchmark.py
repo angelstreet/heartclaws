@@ -133,6 +133,43 @@ MODELS: dict[str, ModelConfig] = {
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
+    "minimax-m25": ModelConfig(
+        name="MiniMax M2.5",
+        model_id="minimax/minimax-m2.5",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "minimax-01": ModelConfig(
+        name="MiniMax 01",
+        model_id="minimax/minimax-01",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    # --- Free OpenRouter models ---
+    "step-flash": ModelConfig(
+        name="Step 3.5 Flash",
+        model_id="stepfun/step-3.5-flash:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "nemotron": ModelConfig(
+        name="Nemotron Nano 30B",
+        model_id="nvidia/nemotron-3-nano-30b-a3b:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "trinity": ModelConfig(
+        name="Trinity Large",
+        model_id="arcee-ai/trinity-large-preview:free",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "qwen-vl": ModelConfig(
+        name="Qwen3 VL 30B",
+        model_id="qwen/qwen3-vl-30b-a3b-thinking",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
     # --- Direct APIs ---
     "codestral": ModelConfig(
         name="Codestral",
@@ -710,6 +747,18 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
                 log.info("  [%dx] %s", count, err)
         else:
             log.info("\nNo errors.")
+
+
+def _resolve_model(key: str) -> tuple[str, ModelConfig]:
+    """Resolve a model key or OpenRouter model ID (e.g. 'meta-llama/llama-4-scout:free')."""
+    if key in MODELS:
+        return key, MODELS[key]
+    # Treat as an OpenRouter model ID (provider/model-name format)
+    if "/" in key:
+        name = key.split("/")[-1].split(":")[0].replace("-", " ").title()
+        model = ModelConfig(name=name, model_id=key, provider="openrouter", api_key_env="OPENROUTER_API_KEY")
+        return key, model
+    return key, None
 
 
 def _resolve_model(key: str) -> tuple[str, ModelConfig]:
