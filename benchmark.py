@@ -123,9 +123,9 @@ MODELS: dict[str, ModelConfig] = {
     ),
     "grok": ModelConfig(
         name="Grok Code",
-        model_id="x-ai/grok-code-fast-1",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
+        model_id="grok-code-fast-1",  # uses XAI_API_KEY (direct) or falls back to OpenRouter
+        provider="xai",
+        api_key_env="XAI_API_KEY",
     ),
     "claude-sonnet": ModelConfig(
         name="Claude Sonnet 4",
@@ -202,7 +202,8 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
         # For Anthropic, try the env var that Claude Code uses
         if model.provider == "anthropic":
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
+        # xai falls back to OpenRouter — don't skip, handle inside the provider branch
+        if not api_key and model.provider != "xai":
             log.warning("No API key for %s (%s) — skipping", model.name, model.api_key_env)
             return []
 
@@ -333,6 +334,31 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
             data = resp.json()
             if resp.status_code >= 400:
                 log.warning("Mistral API error %d for %s: %s", resp.status_code, model.model_id, data)
+                return []
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+
+        elif model.provider == "xai":
+            # xAI direct API (OpenAI-compatible). Falls back to OpenRouter if no XAI_API_KEY.
+            if not api_key:
+                log.warning("No XAI_API_KEY — falling back to OpenRouter for %s", model.name)
+                model_id_or = f"x-ai/{model.model_id}"
+                or_key = SECRETS.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {or_key}", "Content-Type": "application/json", "HTTP-Referer": "https://pikaai.me"},
+                    json={"model": model_id_or, "max_tokens": 1024, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]},
+                    timeout=60,
+                )
+            else:
+                resp = await client.post(
+                    "https://api.x.ai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model.model_id, "max_tokens": 1024, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]},
+                    timeout=30,
+                )
+            data = resp.json()
+            if resp.status_code >= 400:
+                log.warning("xAI API error %d for %s: %s", resp.status_code, model.model_id, data)
                 return []
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
 
@@ -596,9 +622,16 @@ async def run_benchmark(model_keys: list[str], turns: int, session_name: str | N
             api_key = SECRETS.get(model.api_key_env) or os.environ.get(model.api_key_env, "")
             if not api_key and model.provider == "anthropic":
                 api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
+            # xai falls back to OpenRouter if no direct key — allow it through
+            if not api_key and model.provider != "xai":
                 log.warning("No API key for %s — skipping", model.name)
                 continue
+            if not api_key and model.provider == "xai":
+                or_key = SECRETS.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+                if not or_key:
+                    log.warning("No XAI_API_KEY or OPENROUTER_API_KEY for %s — skipping", model.name)
+                    continue
+                log.info("%s: no XAI_API_KEY, will use OpenRouter fallback", model.name)
             agents.append(BenchmarkAgent(model_key=key, model=model))
 
         if not agents:
