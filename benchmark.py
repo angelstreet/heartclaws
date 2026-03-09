@@ -84,17 +84,17 @@ class ModelConfig:
 
 MODELS: dict[str, ModelConfig] = {
     # --- Paid / fast models (default benchmark lineup) ---
+    "minimax-m25hs": ModelConfig(
+        name="MiniMax M2.5 HS",
+        model_id="MiniMax-M2.5-highspeed",
+        provider="minimax",
+        api_key_env="MINIMAX_API_KEY",
+    ),
     "minimax-01": ModelConfig(
         name="MiniMax 01",
-        model_id="minimax/minimax-01",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "minimax-m25": ModelConfig(
-        name="MiniMax M2.5",
-        model_id="minimax/minimax-m2.5",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
+        model_id="minimax-01",
+        provider="minimax",
+        api_key_env="MINIMAX_API_KEY",
     ),
     "gpt4o-mini": ModelConfig(
         name="GPT-4o Mini",
@@ -282,28 +282,28 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
             text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
 
         elif model.provider == "minimax":
+            # MiniMax Anthropic-compatible endpoint
             resp = await client.post(
-                "https://api.minimax.chat/v1/text/chatcompletion_v2",
+                "https://api.minimax.io/anthropic/v1/messages",
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },
                 json={
                     "model": model.model_id,
                     "max_tokens": 1024,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
+                    "system": SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": user_msg}],
                 },
-                timeout=30,
+                timeout=60,
             )
             data = resp.json()
-            # MiniMax returns errors inside 200 responses
-            if data.get("base_resp", {}).get("status_code", 0) != 0:
-                log.warning("MiniMax API error: %s", data.get("base_resp", {}).get("status_msg"))
+            if resp.status_code >= 400:
+                log.warning("MiniMax API error %d: %s", resp.status_code, data.get("error", data))
                 return []
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+            # content may have thinking blocks before the text block
+            text = next((b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"), "[]")
 
         elif model.provider == "mistral":
             base_url = "https://codestral.mistral.ai" if "codestral" in model.model_id else "https://api.mistral.ai"
@@ -715,7 +715,7 @@ def main():
     parser = argparse.ArgumentParser(description="HeartClaws AI Benchmark")
     parser.add_argument("--turns", type=int, default=100, help="Number of heartbeats to play")
     parser.add_argument(
-        "--models", type=str, default="minimax-01,minimax-m25,gpt4o-mini,codestral",
+        "--models", type=str, default="minimax-m25hs,codestral",
         help=f"Comma-separated model keys or OpenRouter IDs (e.g. meta-llama/llama-4-scout:free). "
              f"Presets: {','.join(MODELS.keys())}",
     )
