@@ -83,12 +83,37 @@ class ModelConfig:
 
 
 MODELS: dict[str, ModelConfig] = {
-    # --- Via OpenRouter (supports many models) ---
-    "claude-sonnet": ModelConfig(
-        name="Claude Sonnet 4",
-        model_id="anthropic/claude-sonnet-4",
+    # --- Paid / fast models (default benchmark lineup) ---
+    "minimax-01": ModelConfig(
+        name="MiniMax 01",
+        model_id="minimax/minimax-01",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
+    ),
+    "minimax-m25": ModelConfig(
+        name="MiniMax M2.5",
+        model_id="minimax/minimax-m2.5",
+        provider="openrouter",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "gpt4o-mini": ModelConfig(
+        name="GPT-4o Mini",
+        model_id="gpt-4o-mini",
+        provider="openai",
+        api_key_env="OPENAI_API_KEY",
+    ),
+    "codestral": ModelConfig(
+        name="Codestral",
+        model_id="codestral-latest",
+        provider="mistral",
+        api_key_env="CODESTRAL_API_KEY",
+    ),
+    # --- Other paid models (add via --models) ---
+    "gpt4o": ModelConfig(
+        name="GPT-4o",
+        model_id="gpt-4o",
+        provider="openai",
+        api_key_env="OPENAI_API_KEY",
     ),
     "grok": ModelConfig(
         name="Grok Code",
@@ -96,104 +121,17 @@ MODELS: dict[str, ModelConfig] = {
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
-    "minimax-m25": ModelConfig(
-        name="MiniMax M2.5",
-        model_id="minimax/minimax-m2.5",
+    "claude-sonnet": ModelConfig(
+        name="Claude Sonnet 4",
+        model_id="anthropic/claude-sonnet-4",
         provider="openrouter",
         api_key_env="OPENROUTER_API_KEY",
     ),
-    "minimax-01": ModelConfig(
-        name="MiniMax 01",
-        model_id="minimax/minimax-01",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    # --- Free OpenRouter models ---
-    "step-flash": ModelConfig(
-        name="Step 3.5 Flash",
-        model_id="stepfun/step-3.5-flash:free",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "llama": ModelConfig(
-        name="Llama 3.3 70B",
-        model_id="meta-llama/llama-3.3-70b-instruct:free",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "trinity": ModelConfig(
-        name="Trinity Large",
-        model_id="arcee-ai/trinity-large-preview:free",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "qwen-vl": ModelConfig(
-        name="Qwen3 VL 30B",
-        model_id="qwen/qwen3-vl-30b-a3b-thinking",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "minimax-m25": ModelConfig(
-        name="MiniMax M2.5",
-        model_id="minimax/minimax-m2.5",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "minimax-01": ModelConfig(
-        name="MiniMax 01",
-        model_id="minimax/minimax-01",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    # --- Free OpenRouter models ---
-    "step-flash": ModelConfig(
-        name="Step 3.5 Flash",
-        model_id="stepfun/step-3.5-flash:free",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "nemotron": ModelConfig(
-        name="Nemotron Nano 30B",
-        model_id="nvidia/nemotron-3-nano-30b-a3b:free",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "trinity": ModelConfig(
-        name="Trinity Large",
-        model_id="arcee-ai/trinity-large-preview:free",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    "qwen-vl": ModelConfig(
-        name="Qwen3 VL 30B",
-        model_id="qwen/qwen3-vl-30b-a3b-thinking",
-        provider="openrouter",
-        api_key_env="OPENROUTER_API_KEY",
-    ),
-    # --- Direct APIs ---
-    "codestral": ModelConfig(
-        name="Codestral",
-        model_id="codestral-latest",
-        provider="mistral",
-        api_key_env="CODESTRAL_API_KEY",
-    ),
-    "minimax": ModelConfig(
+    "minimax-direct": ModelConfig(
         name="MiniMax M1",
         model_id="MiniMax-M1-80k",
         provider="minimax",
         api_key_env="MINIMAX_API_KEY",
-    ),
-    "codex": ModelConfig(
-        name="Codex",
-        model_id="codex-mini",
-        provider="openai",
-        api_key_env="OPENAI_API_KEY",
-    ),
-    "gpt4o": ModelConfig(
-        name="GPT-4o",
-        model_id="gpt-4o",
-        provider="openai",
-        api_key_env="OPENAI_API_KEY",
     ),
     "gemini-flash": ModelConfig(
         name="Gemini 2.0 Flash",
@@ -777,7 +715,7 @@ def main():
     parser = argparse.ArgumentParser(description="HeartClaws AI Benchmark")
     parser.add_argument("--turns", type=int, default=100, help="Number of heartbeats to play")
     parser.add_argument(
-        "--models", type=str, default="minimax-01,trinity,codestral,grok",
+        "--models", type=str, default="minimax-01,minimax-m25,gpt4o-mini,codestral",
         help=f"Comma-separated model keys or OpenRouter IDs (e.g. meta-llama/llama-4-scout:free). "
              f"Presets: {','.join(MODELS.keys())}",
     )
