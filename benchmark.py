@@ -620,6 +620,17 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
             stype = payload.get("structure_type", "")
             sector_id = payload.get("sector_id", "")
             if stype:
+                # Block if sector already has a structure of this type (one per sector per type rule)
+                existing_in_sector = [
+                    s.get("structure_type") for s in state.get("structures", {}).values()
+                    if s.get("sector_id") == sector_id
+                ]
+                if stype in existing_in_sector:
+                    msg = f"BUILD_STRUCTURE {stype}: sector {sector_id} already has one"
+                    agent.last_rejections.append(msg)
+                    agent.all_errors.append(f"[PRE] {msg}")
+                    continue
+
                 # Resource node requirement: EXTRACTOR/DATA_HARVESTER/BIO_CULTIVATOR need a matching node
                 REQUIRED_NODE = {"EXTRACTOR": "METAL", "DATA_HARVESTER": "DATA", "BIO_CULTIVATOR": "BIOMASS"}
                 required = REQUIRED_NODE.get(stype)
