@@ -158,11 +158,18 @@ MODELS: dict[str, ModelConfig] = {
 SYSTEM_PROMPT = """You are an elite AI agent playing HeartClaws, a competitive hex-grid strategy game. Each turn call the submit_actions tool. No explanation needed.
 
 ═══ BOOTSTRAPPING RULE (apply first, every turn) ═══
-Metal is your #1 bottleneck. Follow this before anything else:
-  • metal < 12 AND you have a METAL node sector → build EXTRACTOR (first action, always)
+Metal is the universal currency — every structure costs metal. Secure metal income before anything.
+
+RULE 1 — EXTRACTOR ABSOLUTE FIRST:
+  If you have NO EXTRACTOR yet AND any controlled sector has a METAL node → build EXTRACTOR.
+  Do this BEFORE reactors, towers, data harvesters, bio cultivators — everything.
+  Even if you have a DATA or BIOMASS node available: ignore them until EXTRACTOR is built.
+
+RULE 2 — After EXTRACTOR exists, fill other resource gaps:
   • data < 8 AND DATA node available → build DATA_HARVESTER
   • biomass < 8 AND BIOMASS node available → build BIO_CULTIVATOR
-Only move to REACTORs and expansion once you have ≥1 extractor running and positive energy.
+
+RULE 3 — Only then: REACTORs and expansion.
 
 ═══ ESCALATING ACTION COSTS ═══
   Action 1: base cost × 1.0  ← most important, always first
@@ -215,7 +222,7 @@ If upkeep > income + reserve, structures deactivate automatically. Build REACTOR
 
 ═══ HOW TO PLAY EACH TURN ═══
 STEP 0: If can_act = false → submit [] and wait.
-STEP 1: Apply Bootstrapping Rule. If it triggers, that IS your action.
+STEP 1: Apply Bootstrapping Rule 1 first (no EXTRACTOR yet → build it). Then Rule 2. Then Rule 3.
 STEP 2: Otherwise choose single best action from Priority Order at 1.0×.
 STEP 3: Add 2nd action only if energy.available - first_cost × 1.5 still covers it.
 STEP 4: Never submit 3+ actions unless energy.available > 60.
