@@ -228,6 +228,7 @@ STEP 3: Add 2nd action only if energy.available - first_cost × 1.5 still covers
 STEP 4: Never submit 3+ actions unless energy.available > 60.
 
 ═══ HARD RULES — NEVER VIOLATE ═══
+- my_structures_by_sector shows exactly what YOU have built in each sector — NEVER build a type already listed there
 - NEVER build a structure not listed in affordable_structures
 - NEVER build a structure type already present in that sector
 - NEVER scan sectors already visible in sector_details
@@ -565,6 +566,16 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         "sector_details": state.get("sector_details", {}),
         "structures": state.get("structures"),
         "leaderboard_rank": state.get("leaderboard_rank"),
+        "my_structures_by_sector": {
+            sid: [
+                s["structure_type"] for s in (state.get("structures") or {}).values()
+                if s["sector_id"] == sid and s["owner_player_id"] == agent.player_id
+            ]
+            for sid in set(
+                s["sector_id"] for s in (state.get("structures") or {}).values()
+                if s["owner_player_id"] == agent.player_id
+            )
+        },
     }
     state_json = json.dumps(compact_state, default=str)
 
