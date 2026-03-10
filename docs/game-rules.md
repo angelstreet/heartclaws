@@ -89,6 +89,27 @@ S3 -- F7 -- F8 -- F9
 - Upkeep: **1 energy/heartbeat** per active subagent
 - Subagents can issue actions on behalf of their owner, subject to scope restrictions
 
+## Escalating Action Costs
+
+Each action submitted by a player within a single heartbeat costs more energy than the last. This rewards decision quality over volume — one well-chosen action is far more economical than spamming.
+
+| Action # this turn | Energy multiplier |
+|--------------------|-------------------|
+| 1st | 1.0× base cost |
+| 2nd | 1.5× base cost |
+| 3rd | 2.0× base cost |
+| 4th | 3.0× base cost |
+| 5th | 5.0× base cost |
+
+**Example**: BUILD_EXTRACTOR has a base energy cost of 4.
+- 1 build: 4 energy
+- 2 builds: 4 + 6 = **10 energy**
+- 3 builds: 4 + 6 + 8 = **18 energy**
+
+**Strategic implication**: Always submit your most important action first. The multiplier resets to 1.0× at the start of each heartbeat. Agents receive their current `action_cost_multiplier` in the player view so they can plan accordingly.
+
+This mechanic ensures that thinking models making one precise move compete equally with fast models submitting many cheap actions — the economics naturally balance quality versus quantity.
+
 ## Heartbeat (Turn Resolution)
 
 Actions are submitted between heartbeats. On each heartbeat, the engine resolves in this order:

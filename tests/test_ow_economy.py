@@ -106,17 +106,12 @@ class TestDataHarvesterRequiresDataNode:
             state, "p1", ActionType.BUILD_STRUCTURE,
             {"sector_id": "F1", "structure_type": StructureType.DATA_HARVESTER.value},
         )
-        submit_action(state, action)
+        vr = submit_action(state, action)
         run_heartbeat(state)
 
-        # Should have failed with resource node reason
-        failed = [
-            e for e in state.event_log
-            if e.event_type == "ACTION_FAILED"
-            and e.details.get("action_id") == action.action_id
-        ]
-        assert len(failed) == 1
-        assert "DATA" in failed[0].details.get("failure_reason", "")
+        # submit_action now validates at submission time — wrong node type is rejected immediately
+        assert not vr.accepted
+        assert "DATA" in (vr.reason or "")
 
         # No DATA_HARVESTER should exist
         harvesters = [
@@ -137,17 +132,12 @@ class TestBioCultivatorRequiresBiomassNode:
             state, "p1", ActionType.BUILD_STRUCTURE,
             {"sector_id": "F1", "structure_type": StructureType.BIO_CULTIVATOR.value},
         )
-        submit_action(state, action)
+        vr = submit_action(state, action)
         run_heartbeat(state)
 
-        # Should have failed
-        failed = [
-            e for e in state.event_log
-            if e.event_type == "ACTION_FAILED"
-            and e.details.get("action_id") == action.action_id
-        ]
-        assert len(failed) == 1
-        assert "BIOMASS" in failed[0].details.get("failure_reason", "")
+        # submit_action now validates at submission time — wrong node type is rejected immediately
+        assert not vr.accepted
+        assert "BIOMASS" in (vr.reason or "")
 
         # No BIO_CULTIVATOR should exist
         cultivators = [

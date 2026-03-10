@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -80,6 +81,7 @@ class ModelConfig:
     model_id: str       # API model ID
     provider: str       # anthropic, openai, gemini, mistral
     api_key_env: str    # Key name in secrets
+    timeout_s: int = 30 # Per-model LLM call timeout in seconds
 
 
 MODELS: dict[str, ModelConfig] = {
@@ -89,12 +91,14 @@ MODELS: dict[str, ModelConfig] = {
         model_id="MiniMax-M2.5-highspeed",
         provider="minimax",
         api_key_env="MINIMAX_API_KEY",
+        timeout_s=45,
     ),
     "minimax-01": ModelConfig(
         name="MiniMax 01",
         model_id="minimax-01",
         provider="minimax",
         api_key_env="MINIMAX_API_KEY",
+        timeout_s=45,
     ),
     "gpt4o-mini": ModelConfig(
         name="GPT-4o Mini",
@@ -151,11 +155,49 @@ MODELS: dict[str, ModelConfig] = {
 # LLM call abstraction
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are an AI agent playing HeartClaws, a hex-grid strategy game. Respond ONLY with a JSON array of 1-5 actions. No explanation, just valid JSON.
+SYSTEM_PROMPT = """You are an elite AI agent playing HeartClaws, a competitive hex-grid strategy game. Each turn call the submit_actions tool. No explanation needed.
 
-Format: [{"action_type": "...", "payload": {...}}, ...]
+═══ BOOTSTRAPPING RULE (apply first, every turn) ═══
+Metal is your #1 bottleneck. Follow this before anything else:
+  • metal < 12 AND you have a METAL node sector → build EXTRACTOR (first action, always)
+  • data < 8 AND DATA node available → build DATA_HARVESTER
+  • biomass < 8 AND BIOMASS node available → build BIO_CULTIVATOR
+Only move to REACTORs and expansion once you have ≥1 extractor running and positive energy.
 
-ACTIONS:
+═══ ESCALATING ACTION COSTS ═══
+  Action 1: base cost × 1.0  ← most important, always first
+  Action 2: base cost × 1.5
+  Action 3: base cost × 2.0
+  Action 4: base cost × 3.0
+  Action 5: base cost × 5.0
+affordable_structures shows what you can afford at 1.0×. If action_cost_multiplier > 1.0,
+recheck affordability manually before submitting a 2nd+ action.
+STRATEGY: One perfect action beats three cheap ones.
+
+═══ PRIORITY ORDER ═══
+1. Bootstrap (see above)
+2. REACTOR — energy multiplies everything; build whenever affordable after bootstrapping
+3. Remaining harvesters on open resource nodes
+4. TOWER — expand into adjacent uncontrolled sectors
+5. SCAN — only if a sector is not yet visible in sector_details
+6. Military / diplomacy — ONLY when metal income ≥ 9/turn
+
+═══ ENERGY SYSTEM ═══
+energy.available = reserve + income - upkeep (capped by throughput). This is your REAL budget.
+If upkeep > income + reserve, structures deactivate automatically. Build REACTORs aggressively.
+
+═══ STRUCTURES (base energy + materials) ═══
+- EXTRACTOR:        4E + 6M       — METAL node required → +3 metal/turn
+- DATA_HARVESTER:   4E + 4M + 2D  — DATA node required  → +3 data/turn
+- BIO_CULTIVATOR:   4E + 4M + 3B  — BIOMASS node required → +3 biomass/turn
+- TOWER:            4E + 5M       — no node → claims adjacent uncontrolled sector
+- REACTOR:          8E + 10M      — no node → +8 energy income/turn (KEY for scaling)
+- ATTACK_NODE:      6E + 9M + 1D  — enables attacking enemy structures
+- SHIELD_GENERATOR: 6E + 8M + 5B
+- TRADE_HUB:        7E + 10M + 3D
+- OUTPOST:          10E + 15M + 2D
+
+═══ ACTIONS ═══
 - BUILD_STRUCTURE: {"sector_id": "H_x_y", "structure_type": "TYPE"}
 - ATTACK_STRUCTURE: {"target_structure_id": "st_xxx"}
 - SET_POLICY: {"target_player_id": "pN", "stance": "ALLY|NEUTRAL|HOSTILE"}
@@ -163,96 +205,196 @@ ACTIONS:
 - SCAN_SECTOR: {"sector_id": "H_x_y"}
 - REMOVE_STRUCTURE: {"structure_id": "st_xxx"}
 
-STRUCTURE TYPES (energy_cost + metal + data + biomass):
-- EXTRACTOR: 4E+6M — requires METAL resource node in sector → +3 metal/turn
-- DATA_HARVESTER: 4E+4M+2D — requires DATA node → +3 data/turn
-- BIO_CULTIVATOR: 4E+4M+3B — requires BIOMASS node → +3 biomass/turn
-- TOWER: 4E+5M — no resource node required → claims uncontrolled sector
-- REACTOR: 8E+10M — no resource node required → +8 energy/turn
-- ATTACK_NODE: 6E+9M+1D | SHIELD_GENERATOR: 6E+8M+5B | TRADE_HUB: 7E+10M+3D | OUTPOST: 10E+15M+2D
+═══ BUILD RULES ═══
+- sector_details shows ALL sectors you can build in (controlled + adjacent uncontrolled) with resource_nodes
+- EXTRACTOR → sector must have resource_nodes containing type="METAL"
+- DATA_HARVESTER → type="DATA" node required
+- BIO_CULTIVATOR → type="BIOMASS" node required
+- TOWER → can_build_tower=true in sector (adjacent, uncontrolled)
+- One structure per sector maximum
 
-BUILD RULES:
-- Your game state includes "sector_details" — this shows ALL sectors you can build in (your controlled ones + adjacent uncontrolled ones) WITH their resource_nodes.
-- Build EXTRACTOR in a sector with resource_nodes containing type="METAL"
-- Build DATA_HARVESTER in a sector with resource_nodes containing type="DATA"
-- Build BIO_CULTIVATOR in a sector with resource_nodes containing type="BIOMASS"
-- Build TOWER in any sector where can_build_tower=true (adjacent, uncontrolled)
-- You can build multiple structures per turn if you have resources
+═══ HOW TO PLAY EACH TURN ═══
+STEP 0: If can_act = false → submit [] and wait.
+STEP 1: Apply Bootstrapping Rule. If it triggers, that IS your action.
+STEP 2: Otherwise choose single best action from Priority Order at 1.0×.
+STEP 3: Add 2nd action only if energy.available - first_cost × 1.5 still covers it.
+STEP 4: Never submit 3+ actions unless energy.available > 60.
 
-HOW TO PLAY (strictly follow this each turn):
-STEP 0: Check "can_act". If can_act=false, your energy reserve is 0 — respond with [] (empty array) and wait for energy to regenerate next turn. Do NOT submit any actions.
-STEP 1: Check "affordable_structures" — this is the ONLY list of things you can build right now (accounts for metal, data, biomass AND energy). If it's empty but can_act=true, submit SCAN on an adjacent unknown sector. Only use SET_POLICY if "opponents" list is non-empty.
-STEP 2: Look at sector_details. For each sector listed:
-  - If it has a METAL resource_node and you control it → BUILD EXTRACTOR (if EXTRACTOR is in affordable_structures)
-  - If it has a DATA node → BUILD DATA_HARVESTER (if affordable)
-  - If it has a BIOMASS node → BUILD BIO_CULTIVATOR (if affordable)
-  - If can_build_tower=true → BUILD TOWER to expand territory (if TOWER is affordable)
-STEP 3: Only SCAN if sector_details has no adjacent sectors — NEVER scan sectors already listed
+═══ HARD RULES — NEVER VIOLATE ═══
+- NEVER build a structure not listed in affordable_structures
+- NEVER build a structure type already present in that sector
+- NEVER scan sectors already visible in sector_details
+- NEVER build military (ATTACK_NODE) while metal income < 9/turn
+- NEVER submit action 2+ when action_cost_multiplier > 2.0 unless energy.available > 60
 
-CRITICAL RULES:
-- ONLY build structures that appear in "affordable_structures" — building anything else will always fail
-- NEVER try to build the same structure twice in the same sector (one per sector)
-- NEVER scan sectors already in sector_details
-- If last turn had rejected actions, avoid repeating those exact actions
+Use the submit_actions tool to submit your chosen actions."""
 
-Respond ONLY with a valid JSON array."""
+# ---------------------------------------------------------------------------
+# Universal tool definition — same schema for all models, two wire formats
+# ---------------------------------------------------------------------------
+
+# The actions array schema — identical intent, two serialisations
+_ACTIONS_SCHEMA = {
+    "type": "array",
+    "description": "0-5 actions to take this heartbeat. Empty array to wait.",
+    "items": {
+        "type": "object",
+        "properties": {
+            "action_type": {
+                "type": "string",
+                "enum": [
+                    "BUILD_STRUCTURE", "SCAN_SECTOR", "ATTACK_STRUCTURE",
+                    "SET_POLICY", "TRANSFER_RESOURCE", "REMOVE_STRUCTURE",
+                ],
+            },
+            "payload": {"type": "object"},
+        },
+        "required": ["action_type", "payload"],
+    },
+    "maxItems": 5,
+}
+
+# OpenAI-compatible format (mistral, openai, openrouter, xai)
+TOOL_OPENAI = {
+    "type": "function",
+    "function": {
+        "name": "submit_actions",
+        "description": "Submit your actions for this heartbeat.",
+        "parameters": {
+            "type": "object",
+            "properties": {"actions": _ACTIONS_SCHEMA},
+            "required": ["actions"],
+        },
+    },
+}
+TOOL_CHOICE_OPENAI = {"type": "function", "function": {"name": "submit_actions"}}
+
+# Anthropic-compatible format (anthropic, minimax)
+TOOL_ANTHROPIC = {
+    "name": "submit_actions",
+    "description": "Submit your actions for this heartbeat.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"actions": _ACTIONS_SCHEMA},
+        "required": ["actions"],
+    },
+}
+TOOL_CHOICE_ANTHROPIC = {"type": "tool", "name": "submit_actions"}
+
+
+def _extract_openai_tool(data: dict) -> list[dict] | None:
+    """Extract actions from an OpenAI-format tool_calls response."""
+    msg = data.get("choices", [{}])[0].get("message", {})
+    for tc in msg.get("tool_calls", []):
+        if tc.get("function", {}).get("name") == "submit_actions":
+            try:
+                args = json.loads(tc["function"]["arguments"])
+                return args.get("actions", [])
+            except (json.JSONDecodeError, KeyError):
+                pass
+    return None
+
+
+def _extract_anthropic_tool(data: dict) -> list[dict] | None:
+    """Extract actions from an Anthropic-format tool_use response."""
+    for block in data.get("content", []):
+        if block.get("type") == "tool_use" and block.get("name") == "submit_actions":
+            return block.get("input", {}).get("actions", [])
+    return None
+
+
+def _parse_text_fallback(text: str, model_name: str) -> list[dict]:
+    """Last-resort: extract a JSON array from free-form text."""
+    import re
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    if not text:
+        return []
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for match in reversed(list(re.finditer(r'\[.*?\]', text, flags=re.DOTALL))):
+        try:
+            parsed = json.loads(match.group())
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+    match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+    if match:
+        try:
+            return [json.loads(match.group())]
+        except json.JSONDecodeError:
+            pass
+    log.warning("%s tool call missing — text fallback also failed: %s", model_name, text[:120])
+    return []
 
 
 async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: str) -> list[dict]:
-    """Call an LLM and parse its action response."""
+    """Call an LLM using the universal submit_actions tool and return its chosen actions."""
     api_key = SECRETS.get(model.api_key_env) or os.environ.get(model.api_key_env, "")
     if not api_key:
-        # For Anthropic, try the env var that Claude Code uses
         if model.provider == "anthropic":
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        # xai falls back to OpenRouter — don't skip, handle inside the provider branch
         if not api_key and model.provider != "xai":
             log.warning("No API key for %s (%s) — skipping", model.name, model.api_key_env)
             return []
 
-    user_msg = f"Here is your current game state:\n\n{state_json}\n\nRespond with a JSON array of 1-3 actions."
+    user_msg = f"Game state:\n\n{state_json}\n\nCall submit_actions with your chosen actions."
 
     try:
-        if model.provider == "anthropic":
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model.model_id,
-                    "max_tokens": 1024,
-                    "system": SYSTEM_PROMPT,
-                    "messages": [{"role": "user", "content": user_msg}],
-                },
-                timeout=30,
-            )
-            data = resp.json()
-            text = data.get("content", [{}])[0].get("text", "[]")
+        # ── Anthropic-compatible providers (anthropic, minimax) ──────────────
+        if model.provider in ("anthropic", "minimax"):
+            if model.provider == "anthropic":
+                url = "https://api.anthropic.com/v1/messages"
+                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
+            else:
+                url = "https://api.minimax.io/anthropic/v1/messages"
+                headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
 
-        elif model.provider == "openai":
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model.model_id,
-                    "max_tokens": 1024,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
-                },
-                timeout=30,
-            )
+            resp = await client.post(url, headers=headers, json={
+                "model": model.model_id,
+                "max_tokens": 1024,
+                "system": SYSTEM_PROMPT,
+                "tools": [TOOL_ANTHROPIC],
+                "tool_choice": TOOL_CHOICE_ANTHROPIC,
+                "messages": [{"role": "user", "content": user_msg}],
+            }, timeout=model.timeout_s)
             data = resp.json()
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
+            if resp.status_code >= 400:
+                log.warning("%s API error %d: %s", model.provider, resp.status_code, data.get("error", data))
+                return []
+            actions = _extract_anthropic_tool(data)
+            if actions is None:
+                text = next((b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"), "")
+                return _parse_text_fallback(text, model.name)
+            return actions
 
+        # ── OpenAI-compatible providers (openai, mistral, openrouter, xai) ──
+        if model.provider == "openai":
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        elif model.provider == "mistral":
+            base = "https://codestral.mistral.ai" if "codestral" in model.model_id else "https://api.mistral.ai"
+            url = f"{base}/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        elif model.provider == "openrouter":
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "HTTP-Referer": "https://pikaai.me"}
+        elif model.provider == "xai":
+            if not api_key:
+                log.warning("No XAI_API_KEY — falling back to OpenRouter for %s", model.name)
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                or_key = SECRETS.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+                headers = {"Authorization": f"Bearer {or_key}", "Content-Type": "application/json", "HTTP-Referer": "https://pikaai.me"}
+                model = ModelConfig(model.name, f"x-ai/{model.model_id}", "openrouter", model.api_key_env, model.timeout_s)
+            else:
+                url = "https://api.x.ai/v1/chat/completions"
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         elif model.provider == "gemini":
+            # Gemini native API doesn't use OpenAI tool format — text fallback only
             resp = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model.model_id}:generateContent?key={api_key}",
                 headers={"Content-Type": "application/json"},
@@ -261,151 +403,35 @@ async def call_llm(client: httpx.AsyncClient, model: ModelConfig, state_json: st
                     "contents": [{"parts": [{"text": user_msg}]}],
                     "generationConfig": {"maxOutputTokens": 1024},
                 },
-                timeout=30,
+                timeout=model.timeout_s,
             )
             data = resp.json()
-            text = (
-                data.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "[]")
-            )
-
-        elif model.provider == "openrouter":
-            resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://pikaai.me",
-                },
-                json={
-                    "model": model.model_id,
-                    "max_tokens": 1024,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
-                },
-                timeout=60,
-            )
-            data = resp.json()
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
-
-        elif model.provider == "minimax":
-            # MiniMax Anthropic-compatible endpoint
-            resp = await client.post(
-                "https://api.minimax.io/anthropic/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model.model_id,
-                    "max_tokens": 1024,
-                    "system": SYSTEM_PROMPT,
-                    "messages": [{"role": "user", "content": user_msg}],
-                },
-                timeout=60,
-            )
-            data = resp.json()
-            if resp.status_code >= 400:
-                log.warning("MiniMax API error %d: %s", resp.status_code, data.get("error", data))
-                return []
-            # content may have thinking blocks before the text block
-            text = next((b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"), "[]")
-
-        elif model.provider == "mistral":
-            base_url = "https://codestral.mistral.ai" if "codestral" in model.model_id else "https://api.mistral.ai"
-            resp = await client.post(
-                f"{base_url}/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model.model_id,
-                    "max_tokens": 1024,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
-                },
-                timeout=30,
-            )
-            data = resp.json()
-            if resp.status_code >= 400:
-                log.warning("Mistral API error %d for %s: %s", resp.status_code, model.model_id, data)
-                return []
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
-
-        elif model.provider == "xai":
-            # xAI direct API (OpenAI-compatible). Falls back to OpenRouter if no XAI_API_KEY.
-            if not api_key:
-                log.warning("No XAI_API_KEY — falling back to OpenRouter for %s", model.name)
-                model_id_or = f"x-ai/{model.model_id}"
-                or_key = SECRETS.get("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
-                resp = await client.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {or_key}", "Content-Type": "application/json", "HTTP-Referer": "https://pikaai.me"},
-                    json={"model": model_id_or, "max_tokens": 1024, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]},
-                    timeout=60,
-                )
-            else:
-                resp = await client.post(
-                    "https://api.x.ai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={"model": model.model_id, "max_tokens": 1024, "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]},
-                    timeout=30,
-                )
-            data = resp.json()
-            if resp.status_code >= 400:
-                log.warning("xAI API error %d for %s: %s", resp.status_code, model.model_id, data)
-                return []
-            text = data.get("choices", [{}])[0].get("message", {}).get("content", "[]")
-
+            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            return _parse_text_fallback(text, model.name)
         else:
             log.warning("Unknown provider: %s", model.provider)
             return []
 
-        # Parse JSON from response (handle markdown code blocks, thinking tags, prose)
-        if not text:
-            log.warning("%s returned empty content", model.name)
+        resp = await client.post(url, headers=headers, json={
+            "model": model.model_id,
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            "tools": [TOOL_OPENAI],
+            "tool_choice": TOOL_CHOICE_OPENAI,
+        }, timeout=model.timeout_s)
+        data = resp.json()
+        if resp.status_code >= 400:
+            log.warning("%s API error %d: %s", model.provider, resp.status_code, data.get("error", data))
             return []
-        text = text.strip()
-        # Strip <think>...</think> tags from thinking models
-        import re
-        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        if not text:
-            return []
-        # Try direct parse first
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        # Model may have wrapped JSON in prose — extract first JSON array
-        match = re.search(r'\[.*\]', text, flags=re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        # Model returned a single object instead of array — wrap it
-        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
-        if match:
-            try:
-                return [json.loads(match.group())]
-            except json.JSONDecodeError:
-                pass
-        log.warning("%s returned unparseable response: %s", model.name, text[:120])
-        return []
+        actions = _extract_openai_tool(data)
+        if actions is None:
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+            return _parse_text_fallback(text, model.name)
+        return actions
 
-    except json.JSONDecodeError as e:
-        log.warning("%s returned invalid JSON: %s — raw: %s", model.name, e, (text or "")[:100])
-        return []
     except Exception as e:
         log.warning("%s LLM call failed: %s", model.name, e)
         return []
@@ -497,7 +523,8 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     income = state.get("income", 0)
     upkeep = state.get("upkeep", 0)
     net_energy = income - upkeep
-    energy_reserve = player.get("energy_reserve", 0)
+    # Use "available" (= reserve + income - upkeep, capped) — not raw reserve which ignores upkeep
+    energy_available = energy.get("available", player.get("energy_reserve", 0))
     # COSTS: (metal, data, biomass, energy) — must check ALL four
     COSTS = {
         "EXTRACTOR":        (6, 0, 0, 4),
@@ -512,16 +539,16 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
     }
     affordable = [
         s for s, (m, d, b, e) in COSTS.items()
-        if metal >= m and data >= d and biomass >= b and energy_reserve >= e
+        if metal >= m and data >= d and biomass >= b and energy_available >= e
     ]
 
     # Trim state to reduce tokens — send only what matters
     compact_state = {
         "player": player,
         "resources": {"metal": metal, "data": data, "biomass": biomass},
-        "energy": {"reserve": energy_reserve, "net_per_turn": net_energy, "income": income, "upkeep": upkeep},
-        "affordable_structures": affordable,  # empty = cannot build anything this turn
-        "can_act": energy_reserve >= 1,       # False = submit [] and wait for energy to regenerate
+        "energy": {"available": energy_available, "net_per_turn": net_energy, "income": income, "upkeep": upkeep},
+        "affordable_structures": affordable,  # what you can build as action #1 (at 1.0x cost)
+        "can_act": energy_available >= 1,     # False = submit [] and wait for energy to regenerate
         "opponents": [                         # other players visible in this game
             {"player_id": st["owner_player_id"], "sector_id": st["sector_id"]}
             for st in (state.get("structures") or {}).values()
@@ -541,12 +568,16 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
             state_json += f"- {r}\n"
     agent.last_rejections = []
 
-    # Ask LLM for actions
+    # Ask LLM for actions — per-model timeout: slow/thinking models get more time
     t_llm = time.time()
-    actions = await call_llm(client, agent.model, state_json)
+    try:
+        actions = await asyncio.wait_for(call_llm(client, agent.model, state_json), timeout=float(agent.model.timeout_s))
+    except asyncio.TimeoutError:
+        llm_ms = int((time.time() - t_llm) * 1000)
+        log.warning("%s timed out after %dms — skipping turn", agent.model.name, llm_ms)
+        agent.all_errors.append(f"[TIMEOUT] turn skipped after {llm_ms}ms")
+        return
     llm_ms = int((time.time() - t_llm) * 1000)
-    if llm_ms > 30000:
-        log.warning("%s LLM call took %dms", agent.model.name, llm_ms)
 
     if not actions:
         log.debug("%s (%s): no actions returned", agent.model.name, agent.player_id)
@@ -562,43 +593,64 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
         "POLICY": "SET_POLICY",
     }
 
-    # Submit each action — track running resource consumption so multi-action turns
-    # don't submit more than the player can afford across the whole batch.
-    ENERGY_COSTS = {
-        "EXTRACTOR": 4, "DATA_HARVESTER": 4, "BIO_CULTIVATOR": 4,
-        "TOWER": 4, "REACTOR": 8, "ATTACK_NODE": 6,
-        "SHIELD_GENERATOR": 6, "TRADE_HUB": 7, "OUTPOST": 10,
-    }
+    # Submit each action — pre-filter enforces resource + escalating energy limits so
+    # nothing unaffordable ever reaches the server (0 server rejections guaranteed).
     ACTION_ENERGY = {"SCAN_SECTOR": 2, "SET_POLICY": 1, "TRANSFER_RESOURCE": 1, "ATTACK_STRUCTURE": 3}
+    # Escalating multipliers: Nth action this heartbeat costs base × MULTIPLIERS[N-1]
+    MULTIPLIERS = [1.0, 1.5, 2.0, 3.0, 5.0]
     spent_m, spent_d, spent_b, spent_e = 0, 0, 0, 0  # running totals this turn
+    action_index = 0  # how many actions accepted so far this turn
 
     accepted = []
     rejected = []
     for action in actions[:5]:  # Max 5 per heartbeat
         action_type = ACTION_ALIASES.get(action.get("action_type", ""), action.get("action_type", ""))
         payload = action.get("payload", {})
+        multiplier = MULTIPLIERS[min(action_index, len(MULTIPLIERS) - 1)]
 
-        # Client-side pre-filter: block BUILD_STRUCTURE using remaining (not yet spent) resources
+        # Client-side pre-filter: enforce material, scaled energy, and resource node requirements
         if action_type == "BUILD_STRUCTURE":
             stype = payload.get("structure_type", "")
+            sector_id = payload.get("sector_id", "")
             if stype:
+                # Resource node requirement: EXTRACTOR/DATA_HARVESTER/BIO_CULTIVATOR need a matching node
+                REQUIRED_NODE = {"EXTRACTOR": "METAL", "DATA_HARVESTER": "DATA", "BIO_CULTIVATOR": "BIOMASS"}
+                required = REQUIRED_NODE.get(stype)
+                if required:
+                    sector_info = state.get("sector_details", {}).get(sector_id, {})
+                    nodes = [n.get("type") for n in sector_info.get("resource_nodes", [])]
+                    if required not in nodes:
+                        msg = f"BUILD_STRUCTURE {stype}: sector {sector_id} has no {required} node"
+                        agent.last_rejections.append(msg)
+                        agent.all_errors.append(f"[PRE] {msg}")
+                        continue
                 m, d, b, e = next(
                     ((mv, dv, bv, ev) for s, (mv, dv, bv, ev) in COSTS.items() if s == stype),
                     (999, 999, 999, 999),
                 )
-                rem_m, rem_d, rem_b, rem_e = metal - spent_m, data - spent_d, biomass - spent_b, energy_reserve - spent_e
-                if rem_m < m or rem_d < d or rem_b < b or rem_e < e:
-                    msg = f"BUILD_STRUCTURE {stype}: not affordable (need {m}M/{e}E have {rem_m}M/{rem_e}E)"
+                scaled_e = math.ceil(e * multiplier)
+                rem_m, rem_d, rem_b, rem_e = metal - spent_m, data - spent_d, biomass - spent_b, energy_available - spent_e
+                if rem_m < m or rem_d < d or rem_b < b or rem_e < scaled_e:
+                    msg = f"BUILD_STRUCTURE {stype}: not affordable (need {m}M/{scaled_e}E have {rem_m}M/{rem_e}E)"
                     agent.last_rejections.append(msg)
                     agent.all_errors.append(f"[PRE] {msg}")
                     continue
-                spent_m += m; spent_d += d; spent_b += b; spent_e += e
+                spent_m += m; spent_d += d; spent_b += b; spent_e += scaled_e
 
-        # Block other actions when energy would be exhausted
-        elif action_type in ACTION_ENERGY:
-            cost_e = ACTION_ENERGY[action_type]
-            if energy_reserve - spent_e < cost_e:
-                continue  # silently skip — no energy, no point logging
+        # Block SCAN_SECTOR on sectors already visible in sector_details
+        elif action_type == "SCAN_SECTOR":
+            sid = payload.get("sector_id", "")
+            if sid in state.get("sector_details", {}):
+                msg = f"SCAN_SECTOR {sid}: already visible, skipping"
+                agent.last_rejections.append(msg)
+                agent.all_errors.append(f"[PRE] {msg}")
+                continue
+
+        # Block other actions when scaled energy would be exhausted
+        if action_type in ACTION_ENERGY:
+            cost_e = math.ceil(ACTION_ENERGY[action_type] * multiplier)
+            if energy_available - spent_e < cost_e:
+                continue  # silently skip
             spent_e += cost_e
         result = await hc_post(client, f"/games/{game_id}/actions", {
             "player_id": agent.player_id,
@@ -614,6 +666,7 @@ async def play_turn(client: httpx.AsyncClient, agent: BenchmarkAgent, game_id: s
             elif action_type == "SCAN_SECTOR":
                 detail = f"[{payload.get('sector_id','?')}]"
             accepted.append(f"{action_type}{detail}")
+            action_index += 1
         else:
             agent.actions_failed += 1
             reason = result.get("reason", "?") if result else "no response"

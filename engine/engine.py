@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from .config import GameConfig
 from .enums import ActionType
 from .heartbeat import run_heartbeat as _run_heartbeat
@@ -9,8 +11,15 @@ from .models import (
     HeartbeatResult,
     ValidationResult,
 )
+from .actions import get_action_energy_cost, validate_action
+from .energy import compute_player_available_energy
 from .persistence import load_game as _load_game, save_game as _save_game
 from .world import create_default_world
+
+# Escalating cost multipliers per action number within a single heartbeat.
+# The Nth action submitted by a player this heartbeat costs base × ESCALATING[N-1].
+# This rewards quality decisions over quantity spam.
+ESCALATING_MULTIPLIERS = [1.0, 1.5, 2.0, 3.0, 5.0]
 
 
 def init_game(
@@ -55,6 +64,52 @@ def submit_action(state: GameState, action: Action) -> ValidationResult:
             reason="Missing issuer_player_id",
         )
 
+    # Validate against current game state immediately — give the caller a real reason
+    # instead of silently queuing and failing at heartbeat resolution.
+    player = state.players.get(action.issuer_player_id)
+    if player is None:
+        return ValidationResult(
+            accepted=False,
+            action_id=action.action_id,
+            reason=f"Player '{action.issuer_player_id}' not found",
+        )
+
+    # Escalating cost: the Nth action this heartbeat costs base × ESCALATING[N-1].
+    # Only count pending actions from the current heartbeat period.
+    current_pending = [
+        a for a in state.actions_pending
+        if a.issuer_player_id == action.issuer_player_id
+        and a.submitted_heartbeat == state.heartbeat
+    ]
+    action_number = len(current_pending)  # 0-indexed → action_number=0 means first action
+    multiplier = ESCALATING_MULTIPLIERS[min(action_number, len(ESCALATING_MULTIPLIERS) - 1)]
+    base_cost = get_action_energy_cost(action, state)
+    scaled_cost = math.ceil(base_cost * multiplier)
+
+    # Energy already committed by queued actions this heartbeat (already scaled).
+    pending_energy = sum(a.energy_cost for a in current_pending)
+    available = compute_player_available_energy(state, action.issuer_player_id)
+    remaining = available - pending_energy
+
+    if scaled_cost > 0 and remaining < scaled_cost:
+        suffix = f" (action #{action_number + 1} costs {multiplier:.1f}x)" if multiplier > 1.0 else ""
+        return ValidationResult(
+            accepted=False,
+            action_id=action.action_id,
+            reason=f"Not enough energy (need {scaled_cost}{suffix}, have {remaining})",
+        )
+
+    # Run full validation (sector, resources, etc.) using base energy so it doesn't
+    # double-count; we already handled the scaled energy check above.
+    original_spent = player.energy_spent_this_heartbeat
+    player.energy_spent_this_heartbeat = pending_energy
+    result = validate_action(state, action)
+    player.energy_spent_this_heartbeat = original_spent
+    if not result.accepted:
+        return result
+
+    # Store the scaled cost so the heartbeat debits the correct amount.
+    action.energy_cost = scaled_cost
     state.actions_pending.append(action)
     return ValidationResult(accepted=True, action_id=action.action_id, reason=None)
 
@@ -180,8 +235,19 @@ def get_player_view(state: GameState, player_id: str) -> dict:
         "structures": visible_structures,
         "energy": {
             "reserve": player.energy_reserve,
+            "available": compute_player_available_energy(state, player_id),
             "spent_this_heartbeat": player.energy_spent_this_heartbeat,
         },
+        "action_cost_multiplier": ESCALATING_MULTIPLIERS[
+            min(
+                sum(
+                    1 for a in state.actions_pending
+                    if a.issuer_player_id == player_id
+                    and a.submitted_heartbeat == state.heartbeat
+                ),
+                len(ESCALATING_MULTIPLIERS) - 1,
+            )
+        ],
     }
 
     if espionage_intel:

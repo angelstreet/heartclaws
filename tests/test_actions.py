@@ -34,16 +34,11 @@ class TestBuildInWrongSectorTypeFails:
             state, "p1", ActionType.BUILD_STRUCTURE,
             {"sector_id": "S1", "structure_type": StructureType.REACTOR.value},
         )
-        submit_action(state, action)
+        vr = submit_action(state, action)
         run_heartbeat(state)
 
-        # Should have failed
-        failed = [
-            e for e in state.event_log
-            if e.event_type == "ACTION_FAILED"
-            and e.details.get("action_id") == action.action_id
-        ]
-        assert len(failed) == 1
+        # submit_action now validates at submission time — wrong sector type is rejected immediately
+        assert not vr.accepted
 
 
 class TestBuildWithoutAdjacencyFails:
@@ -93,15 +88,10 @@ class TestCannotRemoveSanctuaryCore:
             state, "p1", ActionType.REMOVE_STRUCTURE,
             {"structure_id": core_id},
         )
-        submit_action(state, action)
+        vr = submit_action(state, action)
         run_heartbeat(state)
 
         # Core should still exist
         assert core_id in state.structures
-        # Should have a failure event
-        failed = [
-            e for e in state.event_log
-            if e.event_type == "ACTION_FAILED"
-            and e.details.get("action_id") == action.action_id
-        ]
-        assert len(failed) == 1
+        # submit_action now rejects at submission time
+        assert not vr.accepted

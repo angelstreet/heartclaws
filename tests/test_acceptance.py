@@ -50,27 +50,27 @@ class TestNoOverspend:
         # SCAN_SECTOR costs 2 energy each. Submit 8 scans = 16 energy.
         # p1 controls S1 (safe), so scan S1 or adjacent F1.
         # S1 is adjacent to F1, S2. p1 controls S1, so scanning F1 (adjacent) is valid.
+        results = []
         for i in range(8):
             action = make_action(
                 state, "p1", ActionType.SCAN_SECTOR,
                 {"sector_id": "F1"}, priority=5,
             )
-            submit_action(state, action)
+            results.append(submit_action(state, action))
 
         run_heartbeat(state)
 
-        # Available energy after second heartbeat:
-        # reserve=15, income=15, upkeep=0 => gross=30, throughput_cap=15 => available=15
-        # So 15 / 2 = 7 scans should resolve, 1 should fail
+        # submit_action now validates at submission time with escalating costs.
+        # With escalating multipliers the 5th+ action exceeds available energy (15).
+        # At least one submission must have been rejected.
+        rejected = [r for r in results if not r.accepted]
+        assert len(rejected) >= 1  # At least one rejected due to energy limit
+
+        # Resolved actions must not exceed throughput cap (15 energy)
         resolved = [a for a in state.event_log if a.event_type == "ACTION_RESOLVED"
                      and a.details.get("action_type") == "SCAN_SECTOR"]
-        failed = [a for a in state.event_log if a.event_type == "ACTION_FAILED"
-                   and a.details.get("action_type") == "SCAN_SECTOR"]
-
-        # Total spend should not exceed 15 (throughput cap)
-        total_spent = len(resolved) * 2
+        total_spent = sum(2 for _ in resolved)
         assert total_spent <= 15
-        assert len(failed) >= 1  # At least one failed
 
 
 # --------------------------------------------------------------------------- #
@@ -129,8 +129,8 @@ class TestFrontierBuildAdjacency:
             {"sector_id": "F5", "structure_type": StructureType.TOWER.value},
         )
         vr_bad = submit_action(state, action_bad)
-        # submit_action just queues; validation happens at heartbeat
-        assert vr_bad.accepted  # queued OK
+        # submit_action now validates at submission time — non-adjacent sector is rejected immediately
+        assert not vr_bad.accepted
 
         run_heartbeat(state)
 
@@ -141,7 +141,7 @@ class TestFrontierBuildAdjacency:
         ]
         assert len(f1_structures) >= 1
 
-        # F5 build should have failed
+        # F5 build was rejected at submission, so no structure exists there
         f5_structures = [
             s for s in state.structures.values()
             if s.sector_id == "F5" and s.owner_player_id == "p1"
@@ -292,16 +292,11 @@ class TestSafeZoneImmunity:
             state, "p2", ActionType.ATTACK_STRUCTURE,
             {"target_structure_id": core_id}, priority=5,
         )
-        submit_action(state, atk)
+        vr_atk = submit_action(state, atk)
         run_heartbeat(state)
 
-        # Attack should have failed
-        failed_events = [
-            e for e in state.event_log
-            if e.event_type == "ACTION_FAILED"
-            and e.details.get("action_type") == "ATTACK_STRUCTURE"
-        ]
-        assert len(failed_events) >= 1
+        # submit_action now validates at submission time — safe zone attack is rejected immediately
+        assert not vr_atk.accepted
         # Core should still exist
         assert core_id in state.structures
 
@@ -341,17 +336,12 @@ class TestSubagentScope:
             priority=5,
             subagent_id=sa_id,
         )
-        submit_action(state, build_f2)
+        vr_f2 = submit_action(state, build_f2)
         run_heartbeat(state)
 
-        # Should have failed
-        failed = [
-            e for e in state.event_log
-            if e.event_type == "ACTION_FAILED"
-            and e.details.get("action_id") == build_f2.action_id
-        ]
-        assert len(failed) == 1
-        assert "not scoped for sector" in failed[0].details.get("failure_reason", "")
+        # submit_action validates scope at submission time now
+        assert not vr_f2.accepted
+        assert "not scoped for sector" in (vr_f2.reason or "")
 
 
 # --------------------------------------------------------------------------- #
