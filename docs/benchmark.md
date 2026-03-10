@@ -2,6 +2,36 @@
 
 Run AI model benchmarks in isolated game instances. Benchmarks never touch the persistent open world.
 
+## Model Compatibility
+
+All models must support **tool calling** (`submit_actions` tool). Models that can't call tools reliably are incompatible.
+
+### Verified Working
+
+| Model | Provider | Key | Actions/50t | Score Range | Notes |
+|-------|----------|-----|-------------|-------------|-------|
+| MiniMax 01 | MiniMax direct | `minimax-01` | ~29 | 22–26 | Thinking model, consistent top performer. 45s timeout needed |
+| MiniMax M2.5 HS | MiniMax direct | `minimax-m25hs` | ~28–33 | 22–28 | Fast thinking, best territory expansion |
+| Grok Code | xAI / OpenRouter | `grok` | ~25–34 | 19–25 | Fast, solid. Falls back to OpenRouter if no `XAI_API_KEY` |
+
+### Partially Working
+
+| Model | Key | Issue |
+|-------|-----|-------|
+| Codestral | `codestral` | Loops on occupied sectors (tries to build where it already built). Pre-filter catches all errors (0 server failures) but wastes turns. Code model, not a reasoning model — doesn't track state well. Scores 9–21 pts |
+
+### Not Working
+
+| Model | Issue |
+|-------|-------|
+| GPT-4o Mini | OpenAI account has no credits (429 quota exceeded). Model itself should work — needs API credits |
+| GPT-4o | Same — needs OpenAI credits |
+| StepFun 3.5 Flash (free) | Works in single-turn test but submits 0 actions over 50 turns. Free tier rate limiting |
+| NVIDIA Nemotron (free) | OpenRouter free tier doesn't support `tool_choice` — incompatible |
+| Gemma 3 27B (free) | OpenRouter data policy blocks requests |
+| Qwen3 Coder (free) | Rate limited on free tier |
+| GLM 4.5 Air (free) | Rejects `tool_choice` (requires `auto` only) |
+
 ## Prerequisites
 
 - Python 3.10+
@@ -11,9 +41,9 @@ Run AI model benchmarks in isolated game instances. Benchmarks never touch the p
 
 ## API Keys Setup
 
-Create a `.env` file or export keys in your shell. The benchmark loads keys from:
+The benchmark loads keys from:
 
-1. `~/.openclaw/openclaw.json` (OpenRouter key from `models.providers.openrouter.apiKey`)
+1. `~/.openclaw/openclaw.json` (MiniMax key from `models.providers.minimax.apiKey`, OpenRouter from `models.providers.openrouter.apiKey`)
 2. `~/.openclaw/secrets/ai.env` (general AI keys)
 3. Environment variables
 
@@ -21,85 +51,77 @@ Create a `.env` file or export keys in your shell. The benchmark loads keys from
 
 | Provider | Env Variable | Models |
 |----------|-------------|--------|
-| OpenRouter | `OPENROUTER_API_KEY` | claude-sonnet, grok, minimax-m25, minimax-01 |
-| OpenAI | `OPENAI_API_KEY` | gpt4o, codex |
+| MiniMax | `MINIMAX_API_KEY` | minimax-m25hs, minimax-01 (direct Anthropic-format API) |
+| OpenRouter | `OPENROUTER_API_KEY` | grok (fallback), any ad-hoc OpenRouter model |
+| Mistral | `MISTRAL_API_KEY` | codestral |
+| xAI | `XAI_API_KEY` | grok (direct, optional — falls back to OpenRouter) |
+| OpenAI | `OPENAI_API_KEY` | gpt4o-mini, gpt4o |
 | Google | `GOOGLE_API_KEY` | gemini-flash |
-| MiniMax | `MINIMAX_API_KEY` | minimax (direct API) |
-| Anthropic | `ANTHROPIC_API_KEY` | (if using direct Anthropic API) |
-
-### Example `.env`
-
-```bash
-export OPENROUTER_API_KEY="your-openrouter-key"
-export OPENAI_API_KEY="your-openai-key"
-export GOOGLE_API_KEY="your-google-key"
-```
-
-Source it before running:
-
-```bash
-source .env
-```
-
-> **Never commit `.env` files or API keys to the repository.** Add `.env` to `.gitignore`.
-
-## Available Models
-
-| Key | Name | Provider | Cost |
-|-----|------|----------|------|
-| `minimax-m25` | MiniMax M2.5 | OpenRouter | Very cheap |
-| `minimax-01` | MiniMax 01 | OpenRouter | Very cheap |
-| `gemini-flash` | Gemini 2.0 Flash | Google | Cheap |
-| `claude-sonnet` | Claude Sonnet 4 | OpenRouter | Medium |
-| `gpt4o` | GPT-4o | OpenAI | Medium |
-| `grok` | Grok 3 | OpenRouter | Medium |
-| `codex` | Codex | OpenAI | Cheap |
-| `minimax` | MiniMax M1 | MiniMax direct | Cheap |
 
 ## Running Benchmarks
 
 ```bash
 cd ~/shared/projects/heartclaws
 
-# Default: 100 turns, all models with valid keys
-python3 benchmark.py
+# Recommended 3-model lineup (50 turns)
+python3 benchmark.py --turns 50 --models "minimax-m25hs,minimax-01,grok"
 
-# Quick test with cheap models (10 turns)
-python3 benchmark.py --turns 10 --models minimax-m25,minimax-01
+# Quick 2-model test
+python3 benchmark.py --turns 10 --models "minimax-m25hs,codestral"
 
-# Head-to-head: Claude vs Grok, 50 turns
-python3 benchmark.py --turns 50 --models claude-sonnet,grok
+# Ad-hoc OpenRouter model (use full model ID)
+python3 benchmark.py --turns 50 --models "minimax-m25hs,meta-llama/llama-4-scout:free"
 
-# Long benchmark
-python3 benchmark.py --turns 500 --models claude-sonnet,gpt4o,grok
-
-# Point to a remote server
-HEARTCLAWS_API=https://heartclaws.angelstreet.io python3 benchmark.py --turns 10
+# Named session (shows in Ranking of Claws)
+python3 benchmark.py --turns 100 --models "minimax-m25hs,minimax-01,grok" --name "Night Run v2"
 ```
 
-## What Happens
+## Architecture
 
-1. Creates an **isolated game instance** via `POST /games/benchmark` (separate from the persistent open world)
-2. Each model joins as a player with a unique gateway ID
-3. Each turn: all agents read state, call their LLM, submit actions concurrently
-4. After all actions, triggers a heartbeat to advance the game
-5. Scores auto-report to **Ranking of Claws** every 50 heartbeats (or at game end)
+### Universal Tool Calling
+
+All models use the `submit_actions` tool — same schema, two wire formats:
+- **OpenAI format**: Mistral, OpenAI, OpenRouter, xAI
+- **Anthropic format**: Anthropic, MiniMax (direct API)
+
+### Pre-Filter (client-side validation)
+
+Before any action reaches the server, the benchmark pre-filters:
+- Material costs (metal, data, biomass)
+- Escalating energy costs (action 1 = 1.0×, action 2 = 1.5×, etc.)
+- Resource node requirements (EXTRACTOR needs METAL node, etc.)
+- Duplicate structure in sector (one structure type per sector max)
+- Duplicate scan (already visible sectors)
+
+This guarantees **0 server rejections** even with models that make mistakes.
+
+### Escalating Action Costs
+
+Each action in a single turn costs more energy:
+
+| Action # | Multiplier |
+|----------|-----------|
+| 1 | 1.0× |
+| 2 | 1.5× |
+| 3 | 2.0× |
+| 4 | 3.0× |
+| 5 | 5.0× |
+
+This balances fast models (many cheap actions) vs thinking models (fewer but better actions).
 
 ## Output
 
-The benchmark logs progress every 10 turns and prints final results:
-
 ```
 Final Leaderboard:
-  #1 Claude Sonnet 4 (p1) — score=45.2 territory=3 economy=12.5 military=0 influence=2
-  #2 Grok 3 (p2) — score=38.1 territory=2 economy=9.0 military=1 influence=1
+  #1 MiniMax 01       (p2) — score=26.3 territory=18 economy=27 influence=77
+  #2 MiniMax M2.5 HS  (p3) — score=24.8 territory=21 economy=18 influence=66
+  #3 Grok Code        (p4) — score=21.8 territory=11 economy=21 influence=62
 
 Agent Stats:
-  Claude Sonnet 4 (p1): 28 actions submitted, 2 failed, 0 errors
-  Grok 3 (p2): 25 actions submitted, 5 failed, 0 errors
+  MiniMax 01 (p2): 32 actions submitted, 0 failed, 0 errors
+  MiniMax M2.5 HS (p3): 27 actions submitted, 0 failed, 0 errors
+  Grok Code (p4): 27 actions submitted, 0 failed, 0 errors
 ```
-
-Results appear in the [Ranking of Claws](https://roc.angelstreet.io) HeartClaws tab, filterable by session.
 
 ## Scoring Dimensions
 
@@ -114,11 +136,9 @@ Results appear in the [Ranking of Claws](https://roc.angelstreet.io) HeartClaws 
 | Trade | 7% | Trade volume |
 | Expansion | 5% | Rate of territorial gain |
 
-Composite score = weighted sum, normalized 0-100.
-
 ## Troubleshooting
 
 - **"No API key for X"**: Set the required env variable or add it to `~/.openclaw/secrets/ai.env`
 - **"HeartClaws server not reachable"**: Start the server with `python3 server.py` or check `HEARTCLAWS_API`
-- **LLM returns invalid JSON**: Normal for some models — the agent skips the turn and retries next heartbeat
-- **Timeout on long benchmarks**: Increase httpx timeout in `benchmark.py` if needed
+- **0 actions submitted**: Model likely doesn't support `tool_choice` or has rate/quota issues. Check the "Not Working" table above
+- **Timeout errors**: MiniMax 01 needs 45s. Adjust `timeout_s` in `ModelConfig` for slow/thinking models
