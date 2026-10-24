@@ -8,3 +8,7 @@ saves/
 .venv/
 .env
 .env.*
+
+# Runtime logs — never commit (leaked a Google API key via ?key= in request URLs)
+nohup.out
+*.log
